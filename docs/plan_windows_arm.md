@@ -1,6 +1,6 @@
 # Plan: the host on Windows on Arm
 
-Status: a plan, nothing of it is built yet. Windows 11 on Snapdragon (X Elite / X Plus laptops and tablets, the 8cx generation before them) is arm64, so a
+Status: built on branch `windows-arm`, not yet run on a device: [WINDOWS_ARM.md](WINDOWS_ARM.md). Windows 11 on Snapdragon (X Elite / X Plus laptops and tablets, the 8cx generation before them) is arm64, so a
 Switch game's code can run there natively, as it does on the Mac and on Android phones. The APK cannot be used: Microsoft retired the Windows Subsystem for
 Android in March 2025. This plan ports the Android host (`dm/android`) to a Windows executable, reusing its Vulkan replay and its shaders.
 
