@@ -1,0 +1,26 @@
+# Cross toolchain for Windows on Arm (arm64) with llvm-mingw (https://github.com/mstorsjo/llvm-mingw), from Linux, macOS or an x64 Windows PC:
+#   cmake -G Ninja -S dm/windows -B <build> -DCMAKE_TOOLCHAIN_FILE=dm/windows/cmake/aarch64-w64-mingw32.cmake -DLLVM_MINGW=<llvm-mingw folder> -DGAME=<title ID>
+# LLVM_MINGW (or the environment variable of that name) is the unpacked release; without it the compilers are looked for on PATH.
+# On a Windows on Arm device the native arm64 release of llvm-mingw builds the same way without this file being needed (its clang targets aarch64-w64-mingw32 already).
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR ARM64)
+if(NOT LLVM_MINGW AND DEFINED ENV{LLVM_MINGW})
+  set(LLVM_MINGW $ENV{LLVM_MINGW})
+endif()
+set(_p "")
+if(LLVM_MINGW)
+  set(_p "${LLVM_MINGW}/bin/")
+endif()
+set(_x "")
+if(CMAKE_HOST_WIN32)
+  set(_x ".exe")
+endif()
+set(CMAKE_C_COMPILER ${_p}aarch64-w64-mingw32-clang${_x})
+set(CMAKE_CXX_COMPILER ${_p}aarch64-w64-mingw32-clang++${_x})
+set(CMAKE_ASM_COMPILER ${_p}aarch64-w64-mingw32-clang${_x})
+set(CMAKE_RC_COMPILER ${_p}aarch64-w64-mingw32-windres${_x})
+set(CMAKE_AR ${_p}llvm-ar${_x})
+set(CMAKE_RANLIB ${_p}llvm-ranlib${_x})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
