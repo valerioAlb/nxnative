@@ -1,0 +1,91 @@
+# Windows on Arm (arm64): the host cross-compiled with llvm-mingw on Linux, then run on a real Windows 11 arm64 machine (GitHub's windows-11-arm runner).
+#   build: dm/windows (CMake): woa_spike.exe (the platform checks) and the host for the first target profile, Pokémon Pokopia (0400A3A01EE4C000)
+#   test:  the rewriter's Windows target on the synthetic module of dm/android/tests/selftest_nso.py (dm/windows/tests/test_target_windows.py)
+#   run:   woa_spike.exe on Windows arm64, then that rewritten module end to end in the host (dmhost_cli.exe selftest main: slots through x18, gate, imports, a guest thread)
+# No game file, key or firmware is used anywhere here.
+name: windows-arm
+on:
+  push:
+    branches: [windows-arm]
+    paths: ['dm/**', 'scripts/**', '.github/workflows/windows-arm.yml']
+  pull_request:
+    paths: ['dm/windows/**', '.github/workflows/windows-arm.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  LLVM_MINGW_TAG: '20261104'
+  GAME: 0400A3A01EE4C000
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tools (llvm-mingw, glslang, CMake, Ninja, Python packages)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p ~/tc && cd ~/tc
+          gh release download "$LLVM_MINGW_TAG" -R mstorsjo/llvm-mingw -p "llvm-mingw-$LLVM_MINGW_TAG-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          tar xf llvm-mingw-*.tar.xz && echo "LLVM_MINGW=$HOME/tc/llvm-mingw-$LLVM_MINGW_TAG-ucrt-ubuntu-22.04-x86_64" >> "$GITHUB_ENV"
+          gh release download main-tot -R KhronosGroup/glslang -p glslang-main-linux-x86_64-release.tar.gz
+          mkdir glslang && tar xzf glslang-main-linux-x86_64-release.tar.gz -C glslang && echo "$HOME/tc/glslang/bin" >> "$GITHUB_PATH"
+          python -m pip install ninja "capstone>=5,<6" lz4
+      - name: Platform checks (woa_spike.exe)
+        run: |
+          cmake -G Ninja -S dm/windows -B build/spike -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DDM_SPIKE_ONLY=ON
+          ninja -C build/spike
+      - name: Host (dmhost.exe, dmhost_cli.exe) for ${{ env.GAME }}
+        run: |
+          cmake -G Ninja -S dm/windows -B build/host -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DGAME=$GAME
+          ninja -C build/host -k 0 dmhost_app dmhost_cli 2>&1 | tee build/host.log
+          test -f build/host/dmhost.exe && test -f build/host/dmhost_cli.exe
+      - name: Rewriter for Windows (DM_TARGET=windows) on the synthetic module
+        env:
+          DM_SELFTEST_OUT: build/selftest
+        run: python dm/windows/tests/test_target_windows.py -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-arm64
+          path: |
+            build/spike/woa_spike.exe
+            build/host/dmhost.exe
+            build/host/dmhost_cli.exe
+            build/host.log
+            build/selftest
+          if-no-files-found: warn
+  run:
+    needs: build
+    if: always()
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-arm64
+          path: bin
+      - name: woa_spike.exe
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse bin | Select-Object FullName, Length
+          & bin/spike/woa_spike.exe; if ($LASTEXITCODE) { throw "woa_spike failed ($LASTEXITCODE)" }
+      - name: Host runs the rewritten self-test module (dmhost_cli.exe selftest main)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          if (-not (Test-Path bin/host/dmhost_cli.exe)) { throw 'no dmhost_cli.exe: the host did not link (see host.log in the artifact)' }
+          $d = "$env:RUNNER_TEMP/dm"; New-Item -ItemType Directory -Force "$d/save", "$d/temp" | Out-Null
+          $env:DM_DBG = '1'; $env:DM_SAVE = "$d/save"; $env:DM_TEMP = "$d/temp"
+          & bin/host/dmhost_cli.exe bin/selftest main 2>&1 | Tee-Object -FilePath selftest.log
+          $rc = $LASTEXITCODE
+          if (-not (Select-String -Path selftest.log -Pattern 'selftest: PASS' -Quiet)) { throw "the self test did not pass (exit $rc): see the log above" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-arm64-run-log
+          path: selftest.log
+          if-no-files-found: ignore
