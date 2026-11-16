@@ -43,6 +43,9 @@ import build_ipa_from_nsp as bi   # noqa: E402
 from build_ipa_from_nsp import BuildError, say   # noqa: E402
 
 PKG = 'org.nxnative.android'
+# scripts/build_windows_from_nsp.py sets this to its own steps (an object with finish(...)): the same identification, extraction, rewrite (DM_TARGET=windows) and
+# shader translation, then the Windows on Arm host and a game folder on this computer in place of the Android host, the APK and the phone. None for Android
+WINDOWS = None
 # One signing key for every build on this computer: an update must be signed like the installed app, and uninstalling it would delete the saves and the game files on the phone
 KEYSTORE = Path.home() / '.android' / 'nxnative-debug.jks'
 # DejaVu Sans, which DroidPlay for Linux carries (dm/android/linux/stage.sh puts it here; a checkout has none): the last of both lists below, so a Linux without
@@ -1700,7 +1703,7 @@ def main(argv):
     sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
     import profile_guess; bi.pg = profile_guess
     sys.path.insert(0, str(REPO / 'dm/tools')); import nacp; bi.nacp = nacp
-    sdk = sdk_dir(a.sdk)
+    sdk = None if WINDOWS else sdk_dir(a.sdk)   # a Windows package needs no Android SDK (its decoders on a phone are not reached without one: serial stays None)
     env = dict(os.environ); bi.configure_dotnet(env)
     nsp_dir, app, fam, kind = scan(src, keys, env, nsz=False, want=title_id(a.title_id))   # NSZ files are decompressed once the profile is known: a game this computer can't build stops first
     def unpack(fam): return bi.decompress_nsz(nsp_dir, app, fam, keys, env) if kind is None else fam   # nothing left to do for a fam decompressed already
@@ -1742,8 +1745,8 @@ def main(argv):
     fam = unpack(fam)
     global _work; _work = work
     ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
-    patched = work / f'patched_android_{pkg_ver}'
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='windows' if WINDOWS else 'android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
+    patched = work / f'patched_{"windows" if WINDOWS else "android"}_{pkg_ver}'
     serial = None if a.no_push else a.serial or os.environ.get('ANDROID_SERIAL')
     if not a.no_push and not serial:   # the phone now (its captures are pulled before the shader stages); none connected fails at the install, as before, unless only the phone is wanted
         try: serial = pick_device()
@@ -1828,6 +1831,13 @@ def main(argv):
             say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
             return dg
         spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
+        if WINDOWS:   # the Windows on Arm host and the game's folder (build_windows_from_nsp.py), not the Android host, the APK and the phone
+            font = button_font(work, logs, env)
+            lang = bi.game_language(bi.language_code(a.language) or 'en-US', a.language != 'en-US', nacp.languages(game / 'control.nacp'))
+            label = nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
+            WINDOWS.finish(g, game, patched, spv, font, work / 'aoc', defaults_text(g, lang), work, logs, env,
+                           {'title_id': g.id, 'name': label, 'version': pkg_ver, 'display': nacp.version(game / 'control.nacp')}, runtime)
+            return
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
