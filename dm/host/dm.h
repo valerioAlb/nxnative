@@ -42,6 +42,9 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
 #ifdef __APPLE__
 #define DM_SYM(n) "_" n
 #define DM_HIDDEN ".private_extern "
+#elif defined(_WIN32)
+#define DM_SYM(n) n
+#define DM_HIDDEN ".globl "   // COFF has no hidden visibility; an .exe exports nothing anyway (repeating .globl is harmless)
 #else
 #define DM_SYM(n) n
 #define DM_HIDDEN ".hidden "
@@ -108,7 +111,7 @@ static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++)
 extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 // The page the loader seals the text's read-only + execute range to (and memory queries report it by): 16 KB on Apple silicon; the system's page on
 // Android (4 KB on most devices), so that data sharing the text's last 16 KB stays writable there
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(_WIN32)
 #include <unistd.h>
 static inline uint64_t dm_code_page_mask(void) { return (uint64_t)getpagesize() - 1; }
 #else
@@ -116,8 +119,10 @@ static inline uint64_t dm_code_page_mask(void) { return 0x3FFF; }
 #endif
 // Reading and writing those slots. Apple: pthread TSD, which rewritten code finds at tpidrro_el0 + 8 * key. Android: a per-thread block that x18 points
 // into (Linux preserves x18; the host is built with x18 reserved), the slots below x18 and a shadow call stack above it for system code built with
-// one (dm/android/plat_android.c); rewritten code finds a slot at x18 + its key page value (patch_nso.py DM_TARGET=android)
-#ifdef __ANDROID__
+// one (dm/android/plat_android.c); rewritten code finds a slot at x18 + its key page value (patch_nso.py DM_TARGET=android). Windows on Arm: x18 is the thread's TEB,
+// and the slots are TLS indices in its TlsSlots array (dm/windows/plat_slots.c; DM_TARGET=windows): the same x18 + key page value
+#if defined(__ANDROID__) || defined(_WIN32)
+#define DM_X18_SLOTS 1
 void *dm_slot_get(pthread_key_t k);
 void dm_slot_set(pthread_key_t k, const void *v);
 void dm_slots_thread_init(void);   // give the calling thread its slot block and point x18 at it (idempotent)

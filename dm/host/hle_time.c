@@ -78,13 +78,22 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host tim
     int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "the SDK implementation pairs with now(), taken over with it", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
+// The zone's name and offset of a broken-down local time: fields of struct tm on Apple and Android; Windows' struct tm has neither (dm/windows/plat_windows.c)
+#ifdef _WIN32
+const char *dm_win_tm_zone(const struct tm *tm); long dm_win_tm_gmtoff(const struct tm *tm);
+#define DM_TM_ZONE(tm) dm_win_tm_zone(&(tm))
+#define DM_TM_GMTOFF(tm) dm_win_tm_gmtoff(&(tm))
+#else
+#define DM_TM_ZONE(tm) (tm).tm_zone
+#define DM_TM_GMTOFF(tm) (tm).tm_gmtoff
+#endif
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",
           "time zone rules of the time service; uses the host localtime_r instead", Result, h_time_ToCalendarTime, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt) {
     time_t t = *pt; struct tm tm; localtime_r(&t, &tm);
-    static int once; if (!once++) LOG("ToCalendarTime: first conversion %lld → %04d-%02d-%02d %02d:%02d (time zone %s, offset %ld s)", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_zone ? tm.tm_zone : "?", (long)tm.tm_gmtoff);
+    static int once; if (!once++) LOG("ToCalendarTime: first conversion %lld → %04d-%02d-%02d %02d:%02d (time zone %s, offset %ld s)", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, DM_TM_ZONE(tm) ? DM_TM_ZONE(tm) : "?", (long)DM_TM_GMTOFF(tm));
     if (ct) *ct = (CalendarTime){(int16_t)(tm.tm_year + 1900), (int8_t)(tm.tm_mon + 1), (int8_t)tm.tm_mday, (int8_t)tm.tm_hour, (int8_t)tm.tm_min, (int8_t)tm.tm_sec, 0};
-    if (ai) { memset(ai, 0, sizeof *ai); ai->wday = tm.tm_wday; ai->yday = tm.tm_yday; strlcpy(ai->tzname, tm.tm_zone ? tm.tm_zone : "UTC", sizeof ai->tzname);
-              ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)tm.tm_gmtoff; }
+    if (ai) { memset(ai, 0, sizeof *ai); ai->wday = tm.tm_wday; ai->yday = tm.tm_yday; strlcpy(ai->tzname, DM_TM_ZONE(tm) ? DM_TM_ZONE(tm) : "UTC", sizeof ai->tzname);
+              ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)DM_TM_GMTOFF(tm); }
     return RES_OK;
 }
 // Explicit time zone rules (Monster Hunter Rise, SDK 11): LoadTimeZoneRule reads the rule from the time service; the host keeps the game's rule buffer untouched and converts with localtime_r as above

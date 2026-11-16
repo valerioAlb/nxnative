@@ -1,8 +1,16 @@
-// The Android NVN replay's Vulkan device (gfx_vk.c), shared with the front end that presents the game's window texture (front_android.c).
+// The Android NVN replay's Vulkan device (gfx_vk.c), shared with the front end that presents the game's window texture (front_android.c; on Windows on Arm
+// dm/windows/front_windows.c, which makes its VK_KHR_win32_surface itself: <windows.h>, which vulkan_win32.h needs, stays out of the replay's sources).
 #pragma once
 #include <pthread.h>
 #include <stdint.h>
+#ifdef _WIN32
+#define VKB_SURFACE_EXT "VK_KHR_win32_surface"
+#define VKB_SURFACE_FNS(X)
+#else
 #define VK_USE_PLATFORM_ANDROID_KHR 1
+#define VKB_SURFACE_EXT "VK_KHR_android_surface"
+#define VKB_SURFACE_FNS(X) X(vkCreateAndroidSurfaceKHR)
+#endif
 #define VK_NO_PROTOTYPES 1   // every vk* below is a pointer, filled from the driver vk_driver.c opens: the system's, or DM_VK_DRIVER's
 #include <vulkan/vulkan.h>
 
@@ -15,7 +23,7 @@
     X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndexedIndirect) X(vkCmdEndQuery) X(vkCmdEndRenderPass) \
     X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdResetQueryPool) X(vkCmdResolveImage) X(vkCmdSetBlendConstants) X(vkCmdSetDepthBias) \
     X(vkCmdSetScissor) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilReference) X(vkCmdSetStencilWriteMask) X(vkCmdSetViewport) X(vkCmdWriteTimestamp) \
-    X(vkCreateAndroidSurfaceKHR) X(vkCreateBuffer) X(vkCreateBufferView) X(vkCreateCommandPool) X(vkCreateComputePipelines) X(vkCreateDescriptorPool) \
+    VKB_SURFACE_FNS(X) X(vkCreateBuffer) X(vkCreateBufferView) X(vkCreateCommandPool) X(vkCreateComputePipelines) X(vkCreateDescriptorPool) \
     X(vkCreateDescriptorSetLayout) X(vkCreateDevice) X(vkCreateFence) X(vkCreateFramebuffer) X(vkCreateGraphicsPipelines) X(vkCreateImage) \
     X(vkCreateImageView) X(vkCreatePipelineCache) X(vkCreatePipelineLayout) X(vkCreateQueryPool) X(vkCreateRenderPass) X(vkCreateSampler) \
     X(vkCreateSemaphore) X(vkCreateShaderModule) X(vkCreateSwapchainKHR) X(vkDestroyBuffer) X(vkDestroyBufferView) X(vkDestroyCommandPool) X(vkDestroyDescriptorPool) \

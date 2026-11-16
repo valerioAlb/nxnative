@@ -77,8 +77,8 @@ HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service
 HLE_FORCE("_ZN2nn6socket8FinalizeEv", "pairs with Initialize (cut)", Result, h_sk_Fini, void) { return RES_OK; }
 // The int-argument overloads below are the ones RakNet calls (Divinity: Original Sin 2): with net_loopback, datagram sockets are hle_loopback.c's, every other call fails as before
 int dm_lb_errno(void); void dm_lb_offline_call(void); int dm_lb_takes(int domain, int type, int proto); int dm_lb_owns(int fd); int dm_lb_socket(int domain, int type, int proto);
-int dm_lb_bind(int fd, const void *a, unsigned n); int dm_lb_getsockname(int fd, void *a, unsigned *n); long dm_lb_sendto(int fd, const void *b, unsigned long n, int f, const void *a, unsigned al);
-long dm_lb_recvfrom(int fd, void *b, unsigned long n, int f, void *a, unsigned *al); int dm_lb_setsockopt(int fd, int l, int o, const void *v, unsigned n); int dm_lb_getsockopt(int fd, int l, int o, void *v, unsigned *n);
+int dm_lb_bind(int fd, const void *a, unsigned n); int dm_lb_getsockname(int fd, void *a, unsigned *n); int64_t dm_lb_sendto(int fd, const void *b, uint64_t n, int f, const void *a, unsigned al);
+int64_t dm_lb_recvfrom(int fd, void *b, uint64_t n, int f, void *a, unsigned *al); int dm_lb_setsockopt(int fd, int l, int o, const void *v, unsigned n); int dm_lb_getsockopt(int fd, int l, int o, void *v, unsigned *n);
 int dm_lb_fcntl(int fd, int c, int arg);
 #define LB_OR_OFFLINE(fd, call) do { if (dm_lb_owns(fd)) return call; dm_lb_offline_call(); return -1; } while (0)
 HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "offline: ENETDOWN, or a loopback socket's error", int, h_sk_Errno, void) { return dm_lb_errno(); }
@@ -90,9 +90,9 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
 HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits on the host's event descriptors; nothing else is ever ready", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
 HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: Poll over its sets (the host's event descriptors; nothing else is ever ready)", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut); loopback sockets send to 127.0.0.1", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { LB_OR_OFFLINE(s, dm_lb_sendto(s, b, n, f, a, al)); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut); loopback sockets send to 127.0.0.1", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { LB_OR_OFFLINE(s, dm_lb_sendto(s, b, n, f, a, al)); }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut); loopback sockets receive", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { LB_OR_OFFLINE(s, dm_lb_recvfrom(s, b, n, f, a, al)); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut); loopback sockets send to 127.0.0.1", int64_t, h_sk_SendTo, int s, const void *b, uint64_t n, int f, const void *a, unsigned al) { LB_OR_OFFLINE(s, dm_lb_sendto(s, b, n, f, a, al)); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut); loopback sockets send to 127.0.0.1", int64_t, h_sk_SendTo2, int s, const void *b, uint64_t n, int f, const void *a, unsigned al) { LB_OR_OFFLINE(s, dm_lb_sendto(s, b, n, f, a, al)); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut); loopback sockets receive", int64_t, h_sk_RecvFrom2, int s, void *b, uint64_t n, int f, void *a, unsigned *al) { LB_OR_OFFLINE(s, dm_lb_recvfrom(s, b, n, f, a, al)); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
@@ -104,8 +104,8 @@ HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "offline (cut); loopback sockets 
 HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "offline (cut); loopback sockets accept options", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { LB_OR_OFFLINE(s, dm_lb_setsockopt(s, l, o, v, n)); }
 // Variadic: the Switch passes the third argument in x2, so it is a plain parameter here (hle.h)
 HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "offline (cut); loopback sockets take O_NONBLOCK", int, h_sk_Fcntl2, int s, int c, int arg) { LB_OR_OFFLINE(s, dm_lb_fcntl(s, c, arg)); }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", int64_t, h_sk_Recv2, int s, void *b, uint64_t n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", int64_t, h_sk_Send2, int s, const void *b, uint64_t n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
 
 // ---------- irsensor: the Joy-Con IR camera (Big Brain Academy: Brain vs. Brain's input layer makes one per controller). The host has none: every camera is unconnected,
 // processors cannot run and report no states. The default-config getters and MakeRect only fill the game's structs and keep running in the SDK ----------
@@ -207,7 +207,7 @@ HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, void) { return 
 HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
 HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
 HLE_FORCE("nnsocketShutdown", "offline (cut)", int, h_c_sk_Shutdown, void) { return -1; }
-HLE_FORCE("nnsocketGetAddrInfoWithOptions", "name resolution with resolver options (cut): EAI_FAIL", int, h_c_sk_GaiOpt, const char *h, const char *s, const void *hint, void **res, const void *o, unsigned long n) { (void)h; (void)s; (void)hint; (void)o; (void)n; if (res) *res = NULL; return SK_EAI_FAIL; }
+HLE_FORCE("nnsocketGetAddrInfoWithOptions", "name resolution with resolver options (cut): EAI_FAIL", int, h_c_sk_GaiOpt, const char *h, const char *s, const void *hint, void **res, const void *o, uint64_t n) { (void)h; (void)s; (void)hint; (void)o; (void)n; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo (cut)", void, h_c_sk_FreeAi, void *ai) { (void)ai; }
 HLE_FORCE("nnsocketGAIStrError", "resolver error text", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }

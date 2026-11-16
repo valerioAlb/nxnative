@@ -119,7 +119,7 @@ static int vk_try(char *why, size_t nwhy) {
     uint32_t ni = 0; vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
     VkExtensionProperties *ie = calloc(ni ? ni : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &ni, ie);
     const char *iext[2]; uint32_t nie = 0;
-    if (has_ext(ie, ni, "VK_KHR_surface") && has_ext(ie, ni, "VK_KHR_android_surface")) { iext[nie++] = "VK_KHR_surface"; iext[nie++] = "VK_KHR_android_surface"; g_vk.has_surface = 1; }
+    if (has_ext(ie, ni, "VK_KHR_surface") && has_ext(ie, ni, VKB_SURFACE_EXT)) { iext[nie++] = "VK_KHR_surface"; iext[nie++] = VKB_SURFACE_EXT; g_vk.has_surface = 1; }
     free(ie);
     VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .apiVersion = VK_API_VERSION_1_1};
     VkInstanceCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = nie, .ppEnabledExtensionNames = iext};
@@ -159,7 +159,7 @@ static int vk_try(char *why, size_t nwhy) {
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
     // A DM_VK_DRIVER driver must offer what the window needs (front_android.c vk_init refuses a device without it); the system's driver goes on without, as before
     if (vk_driver_name() && ((forced = vk_driver_fail("extensions")) || !g_vk.has_surface || !g_vk.has_swapchain)) {
-        free(de); return vk_failed(why, nwhy, forced ? "no window extensions" : !g_vk.has_surface ? "no VK_KHR_android_surface" : "no VK_KHR_swapchain", NULL, VK_SUCCESS, forced); }
+        free(de); return vk_failed(why, nwhy, forced ? "no window extensions" : !g_vk.has_surface ? "no " VKB_SURFACE_EXT : "no VK_KHR_swapchain", NULL, VK_SUCCESS, forced); }
     { const char *e = getenv("DM_VK_PRESENT_TIMING");   // frames start on the display's vsyncs and are shown at a time given with them (gfx_vk_vsync.inc); Android's loader implements it on every driver
       if (g_vk.has_swapchain && has_ext(de, nd, "VK_GOOGLE_display_timing") && !(e && *e == '0')) { dext[nde++] = "VK_GOOGLE_display_timing"; g_vk.has_display_timing = 1; } }
     // NVN vertex streams step per N instances (gfx_vk_draw.inc pipe_get). The KHR extension (core in Vulkan 1.4) has the EXT's structures and type values: a device that

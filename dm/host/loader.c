@@ -33,13 +33,25 @@ static pthread_key_t key_value(unsigned i) {
     default: return g_keygate;
     }
 }
-#ifdef __ANDROID__
+#ifdef DM_X18_SLOTS
+#ifdef _WIN32
+// The slots are TLS indices below 64 (dm/windows/plat_slots.c): the key page holds each one's offset in the TEB, which x18 points at
+int dm_win_slot_alloc(unsigned *index);
+static void create_keys(void) {
+    unsigned k[4];
+    for (int i = 0; i < 4; i++) if (dm_win_slot_alloc(&k[i])) die("no TLS index below 64 left for the thread slots (the TEB's TlsSlots)");
+    g_key18 = k[0]; g_keytls = k[1]; g_keytlr = k[2]; g_keygate = k[3];
+    LOG("thread slots in the TEB: K18 %+lld KTLS %+lld KTLR %+lld KGATE %+lld", (long long)dm_slot_keypage_value(g_key18), (long long)dm_slot_keypage_value(g_keytls),
+        (long long)dm_slot_keypage_value(g_keytlr), (long long)dm_slot_keypage_value(g_keygate));
+}
+#else
 // The slots are fixed places in the x18 block (dm.h): the "keys" are the slot numbers, and the key page holds each slot's offset from x18
 static void create_keys(void) {
     g_key18 = KEY_K18; g_keytls = KEY_KTLS; g_keytlr = KEY_KTLR; g_keygate = KEY_KGATE;
     LOG("thread slots in the x18 block: K18 %+lld KTLS %+lld KTLR %+lld KGATE %+lld", (long long)dm_slot_keypage_value(g_key18), (long long)dm_slot_keypage_value(g_keytls),
         (long long)dm_slot_keypage_value(g_keytlr), (long long)dm_slot_keypage_value(g_keygate));
 }
+#endif
 static uint64_t key_page_entry(unsigned i) { return (uint64_t)dm_slot_keypage_value(key_value(i)); }
 // K slot check: slot = x18 + its key page value, as the rewritten code reads it
 static void tsd_check(void) {
@@ -274,6 +286,8 @@ static void read_layout(module_t *m, const char *dir) {
     char line[256], key[48]; unsigned long v; unsigned seen = 0;
 #ifdef __ANDROID__
     const char *want = "android";
+#elif defined(_WIN32)
+    const char *want = "windows";
 #else
     const char *want = "apple";
 #endif

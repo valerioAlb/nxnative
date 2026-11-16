@@ -462,7 +462,7 @@ static void thread_exit(thr_t *t) {
     pthread_setspecific(g_keythr, NULL);
     if (t->closed && !t->sync_refs) thr_free(t);
     pthread_mutex_unlock(&G);
-#ifdef __ANDROID__
+#ifdef DM_X18_SLOTS
     dm_slots_x18_restore();   // bionic's thread exit runs with its own x18 (dm.h); the slot block is freed by its key destructor
 #endif
 #if defined(__aarch64__)

@@ -95,7 +95,7 @@ int dm_lb_getsockname(int fd, void *addr, unsigned *alen) {
     if (s < 0) return fail(E_BADF);
     t_lberr = 0; return 0;
 }
-long dm_lb_sendto(int fd, const void *buf, unsigned long n, int flags, const void *to, unsigned tolen) {
+int64_t dm_lb_sendto(int fd, const void *buf, uint64_t n, int flags, const void *to, unsigned tolen) {
     (void)flags;
     sk_in sa; memset(&sa, 0, sizeof sa);
     if (!to) return fail(E_NOTCONN);
@@ -114,7 +114,7 @@ long dm_lb_sendto(int fd, const void *buf, unsigned long n, int flags, const voi
     for (int i = 0; i < LB_MAX; i++) if (g_lb[i].used && g_lb[i].bound && g_lb[i].port == sa.port) { d = i; break; }
     // A port nobody bound, or a full queue: the datagram is lost, as UDP's are, and the send still succeeds
     static int logged;   // the first datagrams, to see who talks to whom
-    if (logged < 8) { logged++; LOG("socket: loopback %d (port %u) → port %u: %lu bytes%s", fd, __builtin_bswap16(g_lb[s].port), __builtin_bswap16(sa.port), n,
+    if (logged < 8) { logged++; LOG("socket: loopback %d (port %u) → port %u: %llu bytes%s", fd, __builtin_bswap16(g_lb[s].port), __builtin_bswap16(sa.port), (unsigned long long)n,
                                    d < 0 ? ", nobody bound there: lost" : g_lb[d].nq >= LB_QMAX || g_lb[d].qbytes + n > LB_QBYTES ? ", queue full: lost" : ""); }
     if (d >= 0 && g_lb[d].nq < LB_QMAX && g_lb[d].qbytes + n <= LB_QBYTES) {
         dgram *g = malloc(sizeof *g + n);
@@ -126,9 +126,9 @@ long dm_lb_sendto(int fd, const void *buf, unsigned long n, int flags, const voi
         }
     }
     pthread_mutex_unlock(&g_lb_m);
-    t_lberr = 0; return (long)n;
+    t_lberr = 0; return (int64_t)n;
 }
-long dm_lb_recvfrom(int fd, void *buf, unsigned long n, int flags, void *from, unsigned *fromlen) {
+int64_t dm_lb_recvfrom(int fd, void *buf, uint64_t n, int flags, void *from, unsigned *fromlen) {
     pthread_mutex_lock(&g_lb_m);
     int s = slot(fd);
     if (s < 0) { pthread_mutex_unlock(&g_lb_m); return fail(E_BADF); }
@@ -141,7 +141,7 @@ long dm_lb_recvfrom(int fd, void *buf, unsigned long n, int flags, void *from, u
         if ((s = slot(fd)) < 0) { pthread_mutex_unlock(&g_lb_m); return fail(E_BADF); }
     }
     dgram *g = g_lb[s].head;
-    unsigned long k = g->n < n ? g->n : n;   // a short buffer gets the start of the datagram, as BSD does; the rest is lost
+    uint64_t k = g->n < n ? g->n : n;   // a short buffer gets the start of the datagram, as BSD does; the rest is lost
     if (buf && k) memcpy(buf, g->data, k);
     put_addr(from, fromlen, g->from_addr, g->from_port);
     if (!(flags & MSG_PEEK_)) {
@@ -149,7 +149,7 @@ long dm_lb_recvfrom(int fd, void *buf, unsigned long n, int flags, void *from, u
         g_lb[s].nq--; g_lb[s].qbytes -= g->n; free(g);
     }
     pthread_mutex_unlock(&g_lb_m);
-    t_lberr = 0; return (long)k;
+    t_lberr = 0; return (int64_t)k;
 }
 int dm_lb_setsockopt(int fd, int level, int opt, const void *v, unsigned n) {
     pthread_mutex_lock(&g_lb_m);

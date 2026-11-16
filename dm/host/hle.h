@@ -45,7 +45,7 @@ typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
 #define DM_BIGSTACK_STUB(n) ".text\n.p2align 2\n.globl _" n "_bs\n.private_extern _" n "_bs\n_" n "_bs:\n" \
     "    adrp x16, _" n "@PAGE\n    add x16, x16, _" n "@PAGEOFF\n    b _dm_bigstack_enter\n"
 #else
-#define DM_BIGSTACK_STUB(n) ".text\n.p2align 2\n.globl " n "_bs\n.hidden " n "_bs\n" n "_bs:\n" \
+#define DM_BIGSTACK_STUB(n) ".text\n.p2align 2\n.globl " n "_bs\n" DM_HIDDEN n "_bs\n" n "_bs:\n" \
     "    adrp x16, " n "\n    add x16, x16, :lo12:" n "\n    b dm_bigstack_enter\n"
 #endif
 // Same as above, but the implementation runs on this thread's big host stack (hle_bigstack.c): what is registered is a stub generated at compile time (the implementation's address goes into x16, then a jump to dm_bigstack_enter).

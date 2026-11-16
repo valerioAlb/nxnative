@@ -2,20 +2,20 @@
 // The allocator callbacks are recorded in the host global g_nv_alloc; the graphics layer takes them from here later when it needs to allocate memory with the game's allocator.
 #include "../host/hle.h"
 
-typedef void *(*nv_alloc_fn)(unsigned long size, unsigned long align, void *user);
+typedef void *(*nv_alloc_fn)(uint64_t size, uint64_t align, void *user);
 typedef void (*nv_free_fn)(void *p, void *user);
-typedef void *(*nv_realloc_fn)(void *p, unsigned long size, void *user);
+typedef void *(*nv_realloc_fn)(void *p, uint64_t size, void *user);
 struct nv_allocator { nv_alloc_fn alloc; nv_free_fn free; nv_realloc_fn realloc; void *user; };
 struct nv_allocator g_nv_alloc, g_nv_devtools_alloc;
 // The graphics pool the game installs (nv::MemoryInfo reports on it). Nothing is allocated from it on the host: the graphics layer allocates its own Metal objects
-static struct { void *mem; unsigned long size; int inited; } g_nv_pool;
+static struct { void *mem; uint64_t size; int inited; } g_nv_pool;
 
 #define WHY "NVN has been replaced wholesale with a host null device, so the driver glue layer has nothing to do"
 HLE_FORCE("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", WHY "; allocator recorded in g_nv_alloc",
           void, h_nv_SetAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) { g_nv_alloc = (struct nv_allocator){a, f, r, u}; }
 HLE_FORCE("_ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", WHY "; allocator recorded in g_nv_devtools_alloc",
           void, h_nv_SetDevAlloc, nv_alloc_fn a, nv_free_fn f, nv_realloc_fn r, void *u) { g_nv_devtools_alloc = (struct nv_allocator){a, f, r, u}; }
-HLE_FORCE("_ZN2nv18InitializeGraphicsEPvm", WHY "; pool recorded for nv::GetGraphicsMemoryInfo", void, h_nv_Init, void *mem, unsigned long size) {
+HLE_FORCE("_ZN2nv18InitializeGraphicsEPvm", WHY "; pool recorded for nv::GetGraphicsMemoryInfo", void, h_nv_Init, void *mem, uint64_t size) {
     g_nv_pool = (typeof(g_nv_pool)){mem, size, 1};
     LOG("nv::InitializeGraphics: pool %.2f MB, recorded (the host's graphics layer allocates its own)", size / 1048576.0);
 }
@@ -27,7 +27,7 @@ HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the ho
 }
 // The Switch 2's graphics system (nn::gs) check: SDK 22.2.0's (sdk+0x476d60) aborts unless the SDK's own flag reads 1, which the SDK's graphics boot sets on the console and the host, whose
 // graphics layer stands in for that system from the start, never runs. Mario Kart World 1.8.0 checks it before it makes its camera context (by pull request #1116)
-HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system is the host's graphics layer, up from the start", void, h_gs_Check, const char *who, unsigned long n) { (void)who; (void)n; }
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system is the host's graphics layer, up from the start", void, h_gs_Check, const char *who, uint64_t n) { (void)who; (void)n; }
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,
