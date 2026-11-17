@@ -377,8 +377,10 @@ static int run_handler(int sig, void *addr, CONTEXT *ctx, uint64_t esr, int code
     t_mask = was;
     return 1;
 }
+void dm_win_fatal(const char *what);
 void dm_win_crt_sig(int sig) {   // the CRT's signal() handler, which the CRT resets to the default each time: set again
     CONTEXT c; RtlCaptureContext(&c);
+    if (sig == SIGABRT && !g_sig[sig].set) dm_win_fatal("abort(): the FATAL line in log.txt says why");
     if (!run_handler(sig, NULL, &c, 0, 0)) { signal(sig, SIG_DFL); raise(sig); return; }
     if (g_sig[sig].set) signal(sig, dm_win_crt_sig);
 }
@@ -416,13 +418,45 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     if (av) code = mapped ? SEGV_ACCERR : SEGV_MAPERR;
     return run_handler(sig, addr, c, esr_of(er), code) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
+// dmhost_cli.exe with no arguments: <program folder>/selftest main when the self test is there (dmhost.exe runs it too without a game). → 1 with argc/argv set
+int dm_win_default_args(int *argc, char ***argv) {
+    wchar_t w[MAX_PATH]; if (!GetModuleFileNameW(NULL, w, MAX_PATH)) return 0;
+    wchar_t *b = wcsrchr(w, L'\\'); if (!b) return 0; *b = 0;
+    static char dir[MAX_PATH * 3 + 16], t[MAX_PATH * 3 + 40]; static char *av[4];
+    if (utf8_of(w, dir, sizeof dir - 16)) return 0;
+    strcat(dir, "/selftest"); snprintf(t, sizeof t, "%s/main.fixups.tsv", dir);
+    if (GetFileAttributesW(WPATH(t)) == INVALID_FILE_ATTRIBUTES) return 0;
+    fprintf(stderr, "[dm] no arguments: running the self test in %s (dmhost_cli <dir> [mod...] for another module)\n", dir);
+    setenv("DM_DBG", "1", 0);
+    wchar_t tw[MAX_PATH]; char tp[MAX_PATH * 3 + 40], d[MAX_PATH * 3 + 60];
+    if (GetTempPathW(MAX_PATH, tw) && !utf8_of(tw, tp, sizeof tp - 40)) {   // the self test's saves and temp files: %TEMP%\nxnative_selftest
+        strcat(tp, "nxnative_selftest"); CreateDirectoryW(WPATH(tp), NULL);
+        snprintf(d, sizeof d, "%s/save", tp); CreateDirectoryW(WPATH(d), NULL); setenv("DM_SAVE", d, 0);
+        snprintf(d, sizeof d, "%s/temp", tp); CreateDirectoryW(WPATH(d), NULL); setenv("DM_TEMP", d, 0);
+    }
+    av[0] = (*argv)[0]; av[1] = dir; av[2] = "main"; av[3] = NULL; *argv = av; *argc = 3;
+    return 1;
+}
+// The front end's note of a fatal error (front_windows.c: crash.txt and, with no console, a message box), called once before the process ends
+void (*dm_win_fatal_hook)(const char *what);
+void dm_win_fatal(const char *what) { void (*h)(const char *) = dm_win_fatal_hook; dm_win_fatal_hook = NULL; if (h) h(what); }
+static void where_of(const void *pc, char *out, size_t n) {   // "dmhost.exe+0x1234" / "nvoglv64.dll+0x...": the module an address is in
+    HMODULE m = NULL; wchar_t w[MAX_PATH]; char a[MAX_PATH * 3];
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)pc, &m) && GetModuleFileNameW(m, w, MAX_PATH)) {
+        wchar_t *b = wcsrchr(w, L'\\'); WideCharToMultiByte(CP_UTF8, 0, b ? b + 1 : w, -1, a, sizeof a, NULL, NULL);
+        snprintf(out, n, "%s+%#llx", a, (unsigned long long)((const uint8_t *)pc - (const uint8_t *)m));
+    } else snprintf(out, n, "no module (guest or generated code)");
+}
 static LONG WINAPI unhandled(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord; int code = 0; int sig = sig_of(er->ExceptionCode, &code);
     if (!sig) sig = SIGABRT;
     void *addr = er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2 ? (void *)er->ExceptionInformation[1] : (void *)er->ExceptionAddress;
-    fprintf(stderr, "[win] unhandled exception %#lx at pc %p (address %p)\n", (unsigned long)er->ExceptionCode, (void *)ep->ContextRecord->Pc, addr);
+    char where[MAX_PATH * 3 + 32]; where_of((void *)ep->ContextRecord->Pc, where, sizeof where);
+    fprintf(stderr, "[win] unhandled exception %#lx at pc %p (%s), address %p, thread %lu\n", (unsigned long)er->ExceptionCode, (void *)ep->ContextRecord->Pc, where, addr, GetCurrentThreadId());
     t_mask &= ~(1ull << sig);
     if (run_handler(sig, addr, ep->ContextRecord, esr_of(er), code)) return EXCEPTION_CONTINUE_EXECUTION;
+    char m[MAX_PATH * 3 + 128]; snprintf(m, sizeof m, "exception %#lx at %s (address %p)", (unsigned long)er->ExceptionCode, where, addr);
+    dm_win_fatal(m);
     TerminateProcess(GetCurrentProcess(), 128 + sig);
     return EXCEPTION_EXECUTE_HANDLER;
 }

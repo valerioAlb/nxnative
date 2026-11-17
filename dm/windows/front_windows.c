@@ -44,40 +44,81 @@ static HWND g_wnd;
 static _Atomic int g_closing;
 
 // ---------- Log: stderr → log.txt, the console (if any) and the debugger ----------
+// stderr (and stdout) are log.txt itself, opened before anything else runs and unbuffered: every line is in the file the moment it is written, so a start
+// that dies at once (a crash in a driver, an abort) still leaves its lines. A GUI program's CRT streams have no file behind them (UCRT: descriptor -2),
+// so writing to them was lost: log.txt stayed empty (Valerio's Surface: no log at all). A thread follows the file for the console and the window's state.
 static HANDLE g_console_err;
-static void *log_reader(void *p) {
-    int fd = (int)(intptr_t)p; char path[700]; snprintf(path, sizeof path, "%s/log.txt", g_dir);
-    FILE *f = fopen(path, "w"); char buf[8192]; size_t n = 0;
+static wchar_t g_logw[MAX_PATH + 16];
+static int g_console;   // a console shows the log (--console, or started from one)
+static void log_line(char *s) {
+    if (g_console_err) { DWORD w; WriteFile(g_console_err, s, (DWORD)strlen(s), &w, NULL); WriteFile(g_console_err, "\r\n", 2, &w, NULL); }
+    OutputDebugStringA(s); OutputDebugStringA("\n");
+    if (strstr(s, "selftest: PASS")) atomic_store(&g_state, ST_PASS);
+    else if (strstr(s, "selftest: FAIL")) atomic_store(&g_state, ST_FAIL);
+    if (strstr(s, "CRASH") || strstr(s, "FATAL")) atomic_store(&g_state, ST_CRASHED);
+    pthread_mutex_lock(&g_txt_mu); snprintf(g_last, sizeof g_last, "%s", s); pthread_mutex_unlock(&g_txt_mu);
+}
+static void *log_follow(void *p) {
+    (void)p;
+    HANDLE h = CreateFileW(g_logw, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    char buf[8192]; size_t n = 0;
     for (;;) {
-        int k = _read(fd, buf + n, (unsigned)(sizeof buf - 1 - n));
-        if (k <= 0) break;
-        n += (size_t)k; buf[n] = 0;
+        DWORD k = 0;
+        if (!ReadFile(h, buf + n, (DWORD)(sizeof buf - 1 - n), &k, NULL)) break;
+        if (!k) { Sleep(15); continue; }
+        n += k; buf[n] = 0;
         char *s = buf, *e;
-        while ((e = memchr(s, '\n', buf + n - s))) {
-            *e = 0;
-            if (f) { fputs(s, f); fputc('\n', f); fflush(f); }
-            if (g_console_err) { DWORD w; WriteFile(g_console_err, s, (DWORD)strlen(s), &w, NULL); WriteFile(g_console_err, "\r\n", 2, &w, NULL); }
-            OutputDebugStringA(s); OutputDebugStringA("\n");
-            if (strstr(s, "selftest: PASS")) atomic_store(&g_state, ST_PASS);
-            else if (strstr(s, "selftest: FAIL")) atomic_store(&g_state, ST_FAIL);
-            if (strstr(s, "CRASH") || strstr(s, "FATAL")) atomic_store(&g_state, ST_CRASHED);
-            pthread_mutex_lock(&g_txt_mu); snprintf(g_last, sizeof g_last, "%s", s); pthread_mutex_unlock(&g_txt_mu);
-            s = e + 1;
-        }
+        while ((e = memchr(s, '\n', buf + n - s))) { *e = 0; if (e > s && e[-1] == '\r') e[-1] = 0; log_line(s); s = e + 1; }
         n -= (size_t)(s - buf); memmove(buf, s, n);
         if (n == sizeof buf - 1) n = 0;
     }
-    if (f) fclose(f);
+    CloseHandle(h);
     return NULL;
+}
+static int log_open(void) {   // log.txt (made empty) as stderr and stdout: → 1 when it could be written
+    FILE *f = _wfopen(g_logw, L"wb"); if (!f) return 0;
+    fprintf(f, "[dm] nxnative starting (dmhost.exe, %s)\n", DM_GAME_ID); fclose(f);
+    if (!_wfreopen(g_logw, L"ab", stderr)) return 0;
+    if (_fileno(stderr) != 2 && _fileno(stderr) >= 0) _dup2(_fileno(stderr), 2);   // raw writes to descriptor 2 too
+    setvbuf(stderr, NULL, _IONBF, 0);
+    if (_wfreopen(g_logw, L"ab", stdout)) { setvbuf(stdout, NULL, _IONBF, 0); if (_fileno(stdout) != 1 && _fileno(stdout) >= 0) _dup2(_fileno(stdout), 1); }
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(_fileno(stderr)));
+    SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(_fileno(stderr)));
+    return 1;
 }
 static void log_start(int console) {
     if (console && (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole())) { g_console_err = GetStdHandle(STD_ERROR_HANDLE); SetConsoleOutputCP(CP_UTF8); }
     else if (AttachConsole(ATTACH_PARENT_PROCESS)) { g_console_err = GetStdHandle(STD_ERROR_HANDLE); SetConsoleOutputCP(CP_UTF8); }
-    int pfd[2]; if (_pipe(pfd, 1 << 16, _O_BINARY)) return;
-    _dup2(pfd[1], 2); _close(pfd[1]);   // the CRT's stderr is descriptor 2, a GUI program's too (with no handle behind it until now)
-    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
-    setvbuf(stderr, NULL, _IONBF, 0);
-    pthread_t th; pthread_create(&th, NULL, log_reader, (void *)(intptr_t)pfd[0]); pthread_detach(th);
+    if (g_console_err == INVALID_HANDLE_VALUE) g_console_err = NULL;
+    if (g_console_err) {   // AttachConsole leaves the std handles as they were (log.txt's): the console's own output buffer
+        HANDLE c = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        g_console_err = c != INVALID_HANDLE_VALUE ? c : NULL;
+    }
+    g_console = g_console_err != NULL;
+    pthread_t th; if (!pthread_create(&th, NULL, log_follow, NULL)) pthread_detach(th);
+}
+
+// ---------- Fatal errors: crash.txt, and a message box when no console shows the log ----------
+static _Atomic int g_fatal_shown;
+static void fatal_note(const char *what) {   // posix_windows.c dm_win_fatal_hook: an exception nothing handled, or abort(); runs on the failing thread
+    if (atomic_exchange(&g_fatal_shown, 1)) return;
+    fprintf(stderr, "[dm] FATAL %s\n", what);
+    wchar_t cw[MAX_PATH + 16]; wcscpy(cw, g_logw); wchar_t *sl = wcsrchr(cw, L'\\'); if (sl) wcscpy(sl + 1, L"crash.txt");
+    FILE *c = _wfopen(cw, L"wb");
+    if (c) {   // the error, then the log's last 32 KB
+        fprintf(c, "nxnative %s (%s) stopped: %s\r\nThe log up to then (all of it in log.txt):\r\n\r\n", DM_GAME_NAME, DM_GAME_ID, what);
+        FILE *l = _wfopen(g_logw, L"rb");
+        if (l) { fseek(l, 0, SEEK_END); long n = ftell(l); fseek(l, n > 32768 ? n - 32768 : 0, SEEK_SET); char b[4096]; size_t k; while ((k = fread(b, 1, sizeof b, l))) fwrite(b, 1, k, c); fclose(l); }
+        fclose(c);
+    }
+    if (g_console_err) { DWORD w; char m[600]; int n = snprintf(m, sizeof m, "\r\n[dm] FATAL %s\r\n(see log.txt and crash.txt beside dmhost.exe)\r\n", what); WriteFile(g_console_err, m, (DWORD)n, &w, NULL); }
+    const char *nb = getenv("DM_NO_FATAL_BOX");
+    if (!(nb && atoi(nb))) {   // a double-click shows no console: say it in a box (DM_NO_FATAL_BOX=1: never, for unattended runs)
+        char m[900]; snprintf(m, sizeof m, "nxnative stopped:\n\n%s\n\nlog.txt and crash.txt beside dmhost.exe have the details: send them along when reporting it.", what);
+        wchar_t wm[900]; MultiByteToWideChar(CP_UTF8, 0, m, -1, wm, 900);
+        MessageBoxW(NULL, wm, L"nxnative", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+    }
 }
 
 // ---------- Files ----------
@@ -595,11 +636,17 @@ static void utf8_of(const wchar_t *w, char *out, size_t n) {
     WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)n, NULL, NULL);
     for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
 }
+extern void (*dm_win_fatal_hook)(const char *what);   // posix_windows.c
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     (void)prev; (void)cmd;
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // First the log, before anything that can fail: log.txt beside the program (the previous one kept as log.prev.txt)
     wchar_t wp[MAX_PATH]; GetModuleFileNameW(NULL, wp, MAX_PATH); wchar_t *bs = wcsrchr(wp, L'\\'); if (bs) *bs = 0;
     utf8_of(wp, g_dir, sizeof g_dir);
+    char lp[700]; snprintf(lp, sizeof lp, "%s/log.txt", g_dir); keep_prev(lp);
+    _snwprintf(g_logw, MAX_PATH + 15, L"%ls\\log.txt", wp);
+    int logged = log_open();
+    dm_win_fatal_hook = fatal_note;
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     int argc = 0; LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int console = 0; const char *game_arg = NULL; static char ga[700];
     for (int i = 1; i < argc; i++) {
@@ -613,8 +660,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &la))) { utf8_of(la, l8, sizeof l8); CoTaskMemFree(la); }
         snprintf(g_data, sizeof g_data, "%s/nxnative/%s", l8[0] ? l8 : g_dir, DM_GAME_ID); mkdirs(g_data);
     }
-    char lp[700]; snprintf(lp, sizeof lp, "%s/log.txt", g_dir); keep_prev(lp);
     log_start(console);
+    if (!logged) LOG("[RED] cannot write %s: is the folder read-only? (the log goes to the console only)", lp);
     LOG("nxnative on Windows on Arm: %s (%s), program folder %s, game %s, data %s", DM_GAME_NAME, DM_GAME_ID, g_dir, game_arg ? game_arg : g_game, g_data);
     env_file(g_dir, "env.txt", 1); env_file(game_arg ? game_arg : g_game, "launcher.txt", 0); env_file(game_arg ? game_arg : g_game, "defaults.txt", 0);
     vk_driver_dirs(g_dir, g_data);

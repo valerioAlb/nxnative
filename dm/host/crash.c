@@ -244,8 +244,11 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && !defined(DM_WINDOWS)
     usleep(500000);   // stderr reaches logcat and log.txt through a pipe a reader thread empties (front_android.c log_reader): exiting at once lost all but the first lines
+#endif
+#ifdef DM_WINDOWS
+    { void dm_win_fatal(const char *what); char w[160]; snprintf(w, sizeof w, "the host crashed (signal %d): the [dm] CRASH lines in log.txt say where", sig); dm_win_fatal(w); }   // crash.txt, and a message box when no console shows the log
 #endif
     _exit(128 + sig);
 }

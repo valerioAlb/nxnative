@@ -86,6 +86,8 @@ jobs:
       - name: dmhost.exe (the window program) starts as a double-click does, without a game and with one, and writes log.txt
         shell: pwsh
         timeout-minutes: 5
+        env:
+          DM_NO_FATAL_BOX: '1'   # no message box waiting for a click on a fatal error
         run: |
           $fail = @()
           foreach ($case in 'selftest', 'game') {
@@ -99,16 +101,29 @@ jobs:
             Get-ChildItem $d | Select-Object Name, Length | Format-Table | Out-String | Write-Host
             foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 60 | Write-Host } }
             if (-not (Test-Path "$d/log.txt")) { $fail += "$case : no log.txt ($how)" }
+          elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'nxnative on Windows on Arm' -Quiet)) { $fail += "$case : log.txt without the start line ($how)" }
             elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }
             Copy-Item "$d/log.txt" "gui_$case.log" -ErrorAction SilentlyContinue; Copy-Item "$d/crash.txt" "gui_$case.crash.txt" -ErrorAction SilentlyContinue
           }
           if ($fail) { throw ($fail -join '; ') }
+      - name: dmhost_cli.exe without arguments runs the self test beside it
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $d = "$env:RUNNER_TEMP/cli_noargs"; New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item bin/host/dmhost_cli.exe $d; Copy-Item -Recurse bin/selftest "$d/selftest"
+          & "$d/dmhost_cli.exe" 2>&1 | Tee-Object -FilePath cli_noargs.log; $rc = $LASTEXITCODE
+          if (-not (Select-String -Path cli_noargs.log -Pattern 'selftest: PASS' -Quiet)) { throw "no self test PASS (exit $rc)" }
+          Remove-Item -Recurse "$d/selftest"
+          & "$d/dmhost_cli.exe" 2>&1 | Tee-Object -FilePath cli_usage.log; $rc = $LASTEXITCODE
+          if ($rc -ne 2) { throw ('usage exit {0:X8}, not 2' -f $rc) }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-arm64-run-log
           path: |
             selftest.log
+            cli_*.log
             gui_*.log
             gui_*.crash.txt
           if-no-files-found: ignore
