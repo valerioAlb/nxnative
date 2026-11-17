@@ -269,6 +269,25 @@ and when the game closes; always through a temporary file, so a crash never leav
 against the GPU and driver (vendor, device and the driver's cache UUID): after a driver update, or with a damaged file, the log says
 `[vk] pipeline cache ... another driver version's` and it starts empty, then fills again.
 
+### When the GPU hangs (Windows' TDR)
+
+Windows resets a GPU that stays on one submission for more than about 2 s (TDR). Qualcomm's driver then refuses every later
+submission with `-3`, not `VK_ERROR_DEVICE_LOST`, and the picture froze for good. Now the first refused submission after a cut
+one counts as a lost GPU, and so do 8 refusals in a row. `vk_start.txt` gets `device_lost=hang (submission N, M ms)` (or the
+VkResult), the log says `the GPU is gone`, and a message offers to start the game again (saves kept). `DM_GPU_LOST_NOASK=1`
+closes without asking.
+
+To narrow such a hang down (env.txt):
+
+| Line | What it does |
+|---|---|
+| `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower |
+| `DM_VK_MID_DRAWS=8` | GPU submissions of 8 draws, so the hang report names the draw closely (slower) |
+| `DM_OVERLAY_WINDOW=0` | no window over the game at all: no touch controls, F2 menu, FPS or notes |
+| `DM_TOUCH_OVERLAY=off` | the touch controls hidden (F1 brings them back); the menu still works |
+
+The touch controls, menu and notes are a separate GDI window composed by Windows. They never submit Vulkan work.
+
 ## Tested so far
 
 | What | Where | Result |

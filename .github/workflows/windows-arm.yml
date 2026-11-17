@@ -99,14 +99,18 @@ jobs:
           DM_OPEN_MENU_AFTER: '8'  # the settings menu opens by itself after 8 s, for its picture
         run: |
           $fail = @()
-          foreach ($case in 'selftest', 'game') {
+          foreach ($case in 'selftest', 'game', 'gpulost') {
             $d = "$env:RUNNER_TEMP/gui_$case"; New-Item -ItemType Directory -Force $d | Out-Null
             Copy-Item bin/host/dmhost.exe $d; Copy-Item -Recurse bin/selftest "$d/selftest"
             if ($case -eq 'game') { New-Item -ItemType Directory -Force "$d/game" | Out-Null; Copy-Item -Recurse bin/selftest "$d/game/code"; Copy-Item bin/selftest/main.fixups.tsv "$d/game/code/main.fixups.tsv" -ErrorAction SilentlyContinue }
             # the overlay's pictures (DM_OVL_DUMP, self test only): the touch controls, then the settings menu (DM_OPEN_MENU_AFTER)
             if ($case -eq 'selftest') { $env:DM_OVL_DUMP = $d } else { Remove-Item Env:DM_OVL_DUMP -ErrorAction SilentlyContinue }
+            # gpulost: the lost-GPU path (DM_TEST_GPU_LOST, answered with a close: DM_GPU_LOST_NOASK) with no window over the game (DM_OVERLAY_WINDOW=0)
+            foreach ($k in 'DM_TEST_GPU_LOST', 'DM_GPU_LOST_NOASK', 'DM_OVERLAY_WINDOW') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+            if ($case -eq 'gpulost') { $env:DM_TEST_GPU_LOST = '4'; $env:DM_GPU_LOST_NOASK = '1'; $env:DM_OVERLAY_WINDOW = '0' }
             $p = Start-Process -FilePath "$d/dmhost.exe" -WorkingDirectory $d -PassThru
             $done = $p.WaitForExit(25000)
+            foreach ($k in 'DM_TEST_GPU_LOST', 'DM_GPU_LOST_NOASK', 'DM_OVERLAY_WINDOW') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
             if ($case -eq 'selftest') { Copy-Item "$d/ovl_*.bmp" . -ErrorAction SilentlyContinue; foreach ($pic in 'ovl_menu.bmp', 'ovl_menu_controls.bmp') { if (-not (Test-Path $pic)) { $fail += "selftest : no $pic (DM_OVL_DUMP: the settings menu and its Controls page)" } } }
             if (-not $done) { $p.Kill(); $p.WaitForExit(); $how = 'still running after 25 s (killed)' } else { $how = 'exited with {0:X8}' -f $p.ExitCode }
             Write-Host "== $case : $how"
@@ -114,6 +118,10 @@ jobs:
             foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 90 | Write-Host } }
             if (-not (Test-Path "$d/log.txt")) { $fail += "$case : no log.txt ($how)" }
           elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'nxnative on Windows on Arm' -Quiet)) { $fail += "$case : log.txt without the start line ($how)" }
+          elseif ($case -eq 'gpulost') {
+              if (-not $done) { $fail += "gpulost : the window did not close after the lost GPU ($how)" }
+              elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'the GPU is gone \(-4\): the game closes' -Quiet)) { $fail += "gpulost : no lost-GPU line ($how)" }
+              elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'overlay_window=0' -Quiet)) { $fail += "gpulost : DM_OVERLAY_WINDOW=0 not taken ($how)" } }
           elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'touch controls: on \(shown' -Quiet)) { $fail += "$case : the touch controls were not shown ($how)" }
           elseif ($case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern '\[watch\] threads' -Quiet)) { $fail += "selftest : no watchdog thread dump after 10 s of silence ($how)" }
             elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }

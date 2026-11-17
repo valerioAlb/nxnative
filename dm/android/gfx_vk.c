@@ -86,7 +86,7 @@ static int memu_on(void);   // gfx_vk_meshemu.inc: their draws in compute form w
 static int g_fmt_list;   // VK_KHR_image_format_list enabled (vt_create)
 static void pb_dump(void);   // gfx_vk_draw.inc: the pipelines being built, for a crash dump
 static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragment shader writes the stencil test's value (gfx_vk_dscopy.inc)
-static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
+static int g_nonuni, g_null_desc, g_rb2_ext;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
 static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
 #include "gfx_vk_floor.inc"   // DM_VK_GPU_FLOOR: a GPU clock floor through KGSL (the launcher's Keep the GPU clock up, off by default)
@@ -198,6 +198,7 @@ static int vk_try(char *why, size_t nwhy) {
     int smid; { const char *e = getenv("DM_VK_MODULE_ID"); smid = !(e && *e == '0') && has_ext(de, nd, "VK_EXT_shader_module_identifier") && has_ext(de, nd, "VK_EXT_pipeline_creation_cache_control"); }
     int gm = gm_want(de, nd);   // raw global memory (gfx_vk_gmem.inc): asked for only with DM_VK_RAW_GMEM=1
     int dix = has_ext(de, nd, "VK_EXT_descriptor_indexing"), gmdi = gm && (dix || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1);   // its descriptor array's features
+    g_rb2_ext = has_ext(de, nd, "VK_EXT_robustness2");
     free(de);
     VkPhysicalDeviceFeatures want = {.textureCompressionBC = f.textureCompressionBC, .textureCompressionASTC_LDR = f.textureCompressionASTC_LDR,
                                      .textureCompressionETC2 = f.textureCompressionETC2, .independentBlend = f.independentBlend, .geometryShader = f.geometryShader,
@@ -217,7 +218,11 @@ static int vk_try(char *why, size_t nwhy) {
     VkPhysicalDeviceShaderDrawParametersFeatures dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES, .pNext = hqr ? (void *)&hq : divisor ? (void *)&dv : NULL};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = &dp};
     void *qn = dfault ? (void *)&ff : (void *)&dp;
-    VkPhysicalDeviceRobustness2FeaturesEXT rbq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = qn}; if (g_null_desc) qn = &rbq;
+    // DM_VK_ROBUST=1 (env.txt, settings.ini vk_robust): out-of-range buffer and image reads in a translated shader read 0 instead of whatever is there
+    // (robustBufferAccess, VK_EXT_robustness2's robustBufferAccess2 / robustImageAccess2): an A/B for a GPU hang a shader's stray read may cause; a little slower
+    int robust; { const char *e = getenv("DM_VK_ROBUST"); robust = e && *e == '1'; }
+    int rb2 = robust && g_rb2_ext;
+    VkPhysicalDeviceRobustness2FeaturesEXT rbq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = qn}; if (g_null_desc || rb2) qn = &rbq;
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT diq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = qn}; if (g_nonuni || gmdi) qn = &diq;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pcq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = qn};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT smq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pcq}; if (smid) qn = &smq;
@@ -228,7 +233,11 @@ static int vk_try(char *why, size_t nwhy) {
     if (hqr) dext[nde++] = "VK_EXT_host_query_reset";
     if ((dfault = dfault && ff.deviceFault)) dext[nde++] = "VK_EXT_device_fault";
     if ((g_nonuni = g_nonuni && diq.shaderSampledImageArrayNonUniformIndexing && f2.features.shaderSampledImageArrayDynamicIndexing)) dext[nde++] = "VK_EXT_descriptor_indexing";
-    if ((g_null_desc = g_null_desc && rbq.nullDescriptor)) dext[nde++] = "VK_EXT_robustness2";
+    g_null_desc = g_null_desc && rbq.nullDescriptor;
+    int rba2 = rb2 && rbq.robustBufferAccess2 && f.robustBufferAccess, ria2 = rb2 && rbq.robustImageAccess2;
+    if (g_null_desc || rba2 || ria2) dext[nde++] = "VK_EXT_robustness2";
+    if (robust) { want.robustBufferAccess = f.robustBufferAccess; g_vk_feat = want;
+        LOG("[vk] robust access (DM_VK_ROBUST=1): robustBufferAccess %s, robustBufferAccess2 %s, robustImageAccess2 %s", f.robustBufferAccess ? "on" : "not offered", rba2 ? "on" : "no", ria2 ? "on" : "no"); }
     VkPhysicalDeviceMeshShaderFeaturesEXT msf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     if (mesh) { VkPhysicalDeviceFeatures2 mf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &msf}; vkGetPhysicalDeviceFeatures2(g_vk.pd, &mf); mesh = msf.meshShader && msf.taskShader; }
     VkPhysicalDeviceMeshShaderFeaturesEXT mse = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT, .meshShader = VK_TRUE, .taskShader = VK_TRUE};
@@ -250,7 +259,8 @@ static int vk_try(char *why, size_t nwhy) {
     if (mesh) { mse.pNext = dpe.pNext; dpe.pNext = &mse; }
     VkPhysicalDeviceFaultFeaturesEXT ffe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = &dpe, .deviceFault = VK_TRUE};
     void *en = dfault ? (void *)&ffe : (void *)&dpe;
-    VkPhysicalDeviceRobustness2FeaturesEXT rbe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = en, .nullDescriptor = VK_TRUE}; if (g_null_desc) en = &rbe;
+    VkPhysicalDeviceRobustness2FeaturesEXT rbe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = en, .nullDescriptor = g_null_desc ? VK_TRUE : VK_FALSE,
+                                                  .robustBufferAccess2 = rba2 ? VK_TRUE : VK_FALSE, .robustImageAccess2 = ria2 ? VK_TRUE : VK_FALSE}; if (g_null_desc || rba2 || ria2) en = &rbe;
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT die = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = en, .shaderSampledImageArrayNonUniformIndexing = g_nonuni ? VK_TRUE : VK_FALSE};
     if ((gm && gm_np_enable(&die)) || g_nonuni) en = &die;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pce = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = en, .pipelineCreationCacheControl = VK_TRUE};
@@ -681,10 +691,13 @@ static uint64_t g_flushes;
 // order, the one before had completed, and the chunk it was in is the first that took over GPU_SLOW_NS. Breath of the Wild's named one draw every time, once the
 // chunks were cut after every draw (a file vk_mid holding 1, mid_poll). At most 3 such chunks are logged, and the first lost fence or submission says what VK_EXT_device_fault gives
 enum { GPU_SLOW_NS = 200000000 };   // a chunk this long on the GPU (64 draws by default, 512 with DM_VK_MID_DRAWS=512) is a hang or as good as one
+void (*vk_lost_hook)(int result);
+static _Atomic int g_hang_cut;   // a submission was cut short by the driver's hang recovery (gpu_slow): the next refused submission means the GPU is gone
 static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees the loss first
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     vk_driver_lost(r);   // a DM_VK_DRIVER driver's lost device: the next start runs the system's driver once
     vk_start_lost(r);   // and the start record's, whatever the driver
+    if (vk_lost_hook) vk_lost_hook((int)r);   // the front end: a message and a restart instead of a frozen picture
     if (!g_fault_info) { LOG("[RED] [vk] the GPU was lost (%d); the driver offers no VK_EXT_device_fault to say why", r); return; }
     VkDeviceFaultCountsEXT fc = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
     VkResult q = g_fault_info(g_vk.dev, &fc, NULL);
@@ -719,8 +732,19 @@ static VkResult submit_or_fence(VkCommandBuffer cb, VkFence f, const char *who) 
     VkResult r = refuse ? VK_ERROR_INITIALIZATION_FAILED : vkQueueSubmit(g_vk.q, 1, &si, f), alone = r;
     if (r != VK_SUCCESS && r != VK_ERROR_DEVICE_LOST && cb) { si.commandBufferCount = 0; alone = refuse && ra < 0 ? r : vkQueueSubmit(g_vk.q, 1, &si, f); }
     pthread_mutex_unlock(&g_vk.qmu);
-    if (r == VK_SUCCESS) return VK_SUCCESS;
-    if (alone == VK_SUCCESS) { RED_ONCE(166, "vkQueueSubmit failed%s: %d; its fence went alone, so the chunk completes with its work dropped", who, r); return VK_SUCCESS; }
+    static _Atomic int fails;   // refused submissions in a row
+    if (r == VK_SUCCESS) { atomic_store(&fails, 0); return VK_SUCCESS; }
+    if (alone == VK_SUCCESS) {
+        RED_ONCE(166, "vkQueueSubmit failed%s: %d; its fence went alone, so the chunk completes with its work dropped", who, r);
+        // Qualcomm's Windows driver answers -3 (not DEVICE_LOST) to every submission after its hang recovery (TDR): each later chunk's work was dropped and the picture
+        // froze for good, with nothing in the start record. Refused after a cut submission, or 8 times in a row, the GPU counts as lost
+        int n = atomic_fetch_add(&fails, 1) + 1;
+        if (atomic_load(&g_hang_cut) || n >= 8) {
+            static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("[RED] [vk] the GPU refuses every submission (%d, %d in a row%s): it counts as lost", r, n, atomic_load(&g_hang_cut) ? ", after the driver's hang recovery" : "");
+            gpu_fault_log(r == VK_ERROR_INITIALIZATION_FAILED ? VK_ERROR_DEVICE_LOST : r);
+        }
+        return VK_SUCCESS;
+    }
     RED_ONCE(2, "vkQueueSubmit failed%s: %d%s", who, r, alone != r || (cb && r != VK_ERROR_DEVICE_LOST) ? ", and its fence alone too: the GPU counts as lost" : "");
     gpu_fault_log(alone);
     return alone;
@@ -728,6 +752,7 @@ static VkResult submit_or_fence(VkCommandBuffer cb, VkFence f, const char *who) 
 // the completion thread: c took ns on the GPU, its fence gave fr; cut: its end timestamp was never written (the driver's hang recovery skipped the rest of it)
 static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     if (fr != VK_SUCCESS) gpu_fault_log(fr);
+    if (cut && !atomic_exchange(&g_hang_cut, 1)) { char w[64]; snprintf(w, sizeof w, "submission %llu, %.0f ms", (unsigned long long)c->seq, ns / 1e6); vk_start_hang(w); }
     static int nrep; if (nrep >= 3) return;
     nrep++; bc_report("a slow submission", c->seq); int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
     LOG("[RED] [vk] submission %llu took %.0f ms on the GPU%s%s (the one before had completed): it recorded %d passes, draws and dispatches, the last %d of them:", (unsigned long long)c->seq, ns / 1e6,

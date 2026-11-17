@@ -66,6 +66,9 @@ void vk_start_game(const char *dir);
 void vk_start_device(const char *gpu, int driver_id);
 void vk_start_pipe_failed(const char *a, const char *b);
 void vk_start_lost(VkResult r);
+void vk_start_hang(const char *what);   // a submission the driver's hang recovery cut short (Windows' TDR): device_lost=hang (...) unless a loss is already there
+// The front end's hook for a GPU that is gone (gpu_fault_log, once; any thread): Windows offers to restart the game rather than leave it frozen. NULL: none
+extern void (*vk_lost_hook)(int result);
 void vk_start_tick(void);
 int vk_fp_host(void);   // vk_driver.c: the driver's compiles run with FPCR 0 (DM_VK_FP_HOST); the pipeline cache's file is named for it
 

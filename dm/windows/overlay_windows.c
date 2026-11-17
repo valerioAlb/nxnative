@@ -69,6 +69,10 @@ static LRESULT CALLBACK ov_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 void ovl_reload(void) { int vis = g_visible; load_layout(); g_visible = g_mode == 1 ? 1 : g_mode == 2 ? 0 : vis; g_pad.dirty = 1; }
 void ovl_init(HWND owner) {
     g_owner = owner; load_layout();
+    if (st_num("overlay_window", 1) <= 0) {   // DM_OVERLAY_WINDOW=0 (env.txt) / overlay_window=0: no window over the game at all (an A/B: no touch controls, F2 menu, FPS or notes)
+        LOG("touch controls, settings menu, FPS and notes: off (overlay_window=0): nothing is drawn over the game; the mouse is the game's touch screen");
+        g_visible = 0; g_mode = 2; return;
+    }
     int touch = GetSystemMetrics(SM_MAXIMUMTOUCHES) > 0;
     g_visible = g_mode == 1 || (g_mode == 0 && touch);
     WNDCLASSEXW wc = {sizeof wc, 0, ov_proc, 0, 0, GetModuleHandleW(NULL), NULL, LoadCursorW(NULL, (LPCWSTR)IDC_ARROW), NULL, NULL, L"nxnative_touch", NULL};
@@ -123,6 +127,7 @@ static const mitem k_menu[] = {
     {"touch_overlay", "Touch controls", {"auto", "on", "off"}, {"auto", "on", "off"}, 1, "F1 too"},
     {"touch_opacity", "Touch controls' opacity", {"0.6", "0.8", "0.45", "0.3"}, {"60%", "80%", "45%", "30%"}, 1, NULL},
     {"touch_scale", "Touch controls' size", {"1", "1.2", "0.85"}, {"100%", "120%", "85%"}, 1, NULL},
+    {"vk_robust", "GPU safe reads (robust access)", {"", "1"}, {"off", "on"}, 0, "on: a shader's stray reads give 0; try it if the GPU hangs"},
     {"rumble", "Controller rumble", {"1", "0.5", "0"}, {"on", "weak", "off"}, 1, "Xbox controllers (XInput)"},
 };
 enum { NM = sizeof k_menu / sizeof k_menu[0], M_CONTROLS = NM, M_RESTART = NM + 1, M_CLOSE = NM + 2, M_ROWS = NM + 3 };
@@ -198,6 +203,7 @@ static void capture_key(int vk) {   // the key for the row being asked; a stick 
     g_cap = -1;
 }
 void ovl_menu(int open) {
+    if (open && !g_ov) { LOG("settings menu: not available with overlay_window=0"); return; }
     if (g_menu != open) { g_menu = open; g_page = 0; g_cap = -1; g_reset_armed = 0; g_pad.dirty = 1; tp_release_all(&g_pad); LOG("settings menu %s", open ? "open (F2 / Esc closes)" : "closed"); }
 }
 int ovl_menu_open(void) { return g_menu; }
@@ -378,6 +384,7 @@ void ovl_other_input(void) {
     show(0);
 }
 void ovl_toggle(void) {
+    if (!g_ov) return;   // overlay_window=0
     int on = !g_visible; show(on); g_mode = on ? (g_mode == 2 ? 1 : g_mode) : 2;
     st_put("touch_overlay", g_mode == 1 ? "on" : g_mode == 2 ? "off" : "auto");
     LOG("touch controls %s (F1; settings.ini touch_overlay=%s)", on ? "shown" : "hidden", g_mode == 1 ? "on" : g_mode == 2 ? "off" : "auto");

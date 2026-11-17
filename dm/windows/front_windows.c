@@ -594,6 +594,7 @@ static void stall_note(void) {
 // ---------- Settings (settings.ini, the F2 menu): the ones the host reads at its start go into its environment; the others apply at once ----------
 static const struct { const char *key, *env; } k_env[] = {
     {"fps_target", "DM_FPS_TARGET"}, {"opmode", "DM_OPMODE"}, {"render_scale", "DM_RENDER_SCALE"}, {"async_shaders", "DM_VK_ASYNC_PIPE"}, {"vsync", "DM_VSYNC"},
+    {"vk_robust", "DM_VK_ROBUST"},
 };
 static void settings_env(void) {
     for (size_t i = 0; i < sizeof k_env / sizeof k_env[0]; i++) {
@@ -649,6 +650,22 @@ static void full_screen(int on) {
     }
     g_sc_stale = 1;
 }
+// A lost GPU (gfx_vk.c gpu_fault_log: Windows' hang recovery reset it, or the driver refuses every submission): the replay can't go on, so instead of a frozen picture
+// the player is asked whether to start the game again (its saves are on disk; the start record vk_start.txt keeps device_lost=). DM_GPU_LOST_NOASK=1: closed, no question
+enum { WM_GPU_LOST = WM_APP + 7 };
+static void gpu_lost_hook(int r) { LOG("[RED] the GPU is gone (%d): asking to restart the game", r); PostMessageW(g_wnd, WM_GPU_LOST, (WPARAM)r, 0); }
+static void close_game(void);
+static void gpu_lost(int r) {
+    static int once; if (once++) return;
+    const char *na = getenv("DM_GPU_LOST_NOASK");
+    if (na && *na == '1') { LOG("the GPU is gone (%d): the game closes (DM_GPU_LOST_NOASK)", r); close_game(); return; }
+    if (g_full) full_screen(0);
+    wchar_t m[600]; swprintf(m, 600, L"The graphics driver stopped the GPU after it hung (Vulkan %d). The game can't go on in this window.\n\n"
+        L"Start it again now? What you saved in the game is kept.\n\nlog.txt beside dmhost.exe says which draws the GPU was on: please send it.", r);
+    int a = MessageBoxW(g_wnd, m, L"nxnative: the GPU stopped", MB_YESNO | MB_ICONERROR | MB_SETFOREGROUND);
+    LOG("the GPU is gone (%d): %s", r, a == IDYES ? "restarting the game" : "closing");
+    if (a == IDYES) front_restart(); else close_game();
+}
 static DWORD WINAPI pc_save_thread(void *u) { (void)u; vkb_pipeline_cache_save(); return 0; }   // off the window's thread: a big cache takes a moment
 static void close_game(void) {
     if (atomic_exchange(&g_closing, 1)) return;
@@ -668,6 +685,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (m) {
     case WM_CLOSE: close_game(); return 0;
+    case WM_GPU_LOST: gpu_lost((int)w); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_SIZE: g_sc_stale = 1;
         if (game) { static int min; int now = w == SIZE_MINIMIZED; if (now != min) { min = now; dm_focus_set(now ? 3 : 1); dm_audio_suspend(now);
@@ -755,6 +773,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     ShowWindow(g_wnd, show == SW_HIDE ? SW_SHOWNORMAL : show); UpdateWindow(g_wnd);
     { const char *fs = getenv("DM_FULLSCREEN"); if (fs && atoi(fs)) full_screen(1); }
     ovl_init(g_wnd);
+    vk_lost_hook = gpu_lost_hook;
     if (!vk_window_up()) LOG("[RED] no picture: the window's Vulkan swapchain failed (the lines above say why); the game still runs");
     start_host(game_arg);
     for (;;) {
@@ -773,6 +792,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           double t = (double)(dm_win_mono_ns() - g_t0) / 1e9;
           if (at > 0 && step == 0 && t > at) { step = 1; ovl_menu(1); }
           else if (at > 0 && step == 1 && t > at + 3) { step = 2; for (int k = 0; k < 3; k++) ovl_menu_key(VK_UP); ovl_menu_key(VK_RETURN); } }   // then its Controls page, by the keys
+        { static double at = -1; if (at < 0) { const char *e = getenv("DM_TEST_GPU_LOST"); at = e ? atof(e) : 0; }   // CI: the lost-GPU path, as if the driver had reset it after N s
+          if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = 0; gpu_lost_hook(-4); } }
         ovl_follow();
         vk_start_tick();
     }

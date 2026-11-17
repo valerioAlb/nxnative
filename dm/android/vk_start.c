@@ -9,7 +9,7 @@
 //   pipelines_failed=  pipelines the game needed that the driver refused, graphics and compute (each counts once: a failed pipeline isn't made again)
 //   failed_shaders=    the first 4 shader sets among them, comma-separated (one set often fails in several pipelines, with other state): a graphics pipeline's vertex and
 //                      fragment shader keys joined by +, a compute pipeline's shader key
-//   device_lost=       the VkResult when the GPU was lost, else empty
+//   device_lost=       the VkResult when the GPU was lost, "hang (...)" when the driver's hang recovery cut a submission short, else empty
 //   time=              the Unix time the device was made
 // Written when the device is made (a start that ends before that leaves none: the previous start's is removed when the game's folder is known), again within 2 s of a
 // change (vk_start_tick, from the front end's loop: a pipeline fails under the replay's lock, which a file write shouldn't hold up), and at once when the GPU is lost
@@ -84,6 +84,10 @@ void vk_start_pipe_failed(const char *a, const char *b) {
 }
 void vk_start_lost(VkResult r) {
     pthread_mutex_lock(&g_mu); snprintf(g_lost, sizeof g_lost, "%s", vk_result_str(r)); pthread_mutex_unlock(&g_mu);
+    write_rec();
+}
+void vk_start_hang(const char *what) {
+    pthread_mutex_lock(&g_mu); if (!g_lost[0]) snprintf(g_lost, sizeof g_lost, "hang (%s)", what); pthread_mutex_unlock(&g_mu);
     write_rec();
 }
 void vk_start_tick(void) {
