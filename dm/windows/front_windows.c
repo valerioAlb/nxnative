@@ -500,34 +500,23 @@ static int frame_draw(void) {
 
 // ---------- Input: XInput controllers and the keyboard, merged for player 1 as front_android.c merges its sources (buttons ORed, a tilted stick wins) ----------
 static uint64_t g_key_btn; static int g_key_ax[4];   // the keyboard's buttons and its sticks' directions (-1, 0, 1)
-static int g_xi_ok[4]; static uint64_t g_xi_btn[4]; static int32_t g_xi_ax[4][4];
+static int g_xi_ok[4]; static uint64_t g_xi_btn[4]; static uint32_t g_xi_src[4]; static int32_t g_xi_ax[4][4];
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
-static int abxy_label(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PAD_ABXY"); v = e && !strcmp(e, "label"); } return v; }
+// The controller's inputs as remap.h's sources (bit i = source i: a b x y lb rb lt rt ls rs start back up down left right), then mapped (the menu's Controls page)
+static uint32_t xi_sources(const XINPUT_GAMEPAD *g) {
+    static const WORD k[RM_NSRC] = {XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0,
+        XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK,
+        XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT};
+    uint32_t b = 0;
+    for (int i = 0; i < RM_NSRC; i++) if (k[i] && (g->wButtons & k[i])) b |= 1u << i;
+    if (g->bLeftTrigger > 100) b |= 1u << 6;
+    if (g->bRightTrigger > 100) b |= 1u << 7;
+    return b;
+}
 static int32_t xi_axis(SHORT v, SHORT dead) {
     int x = v; if (x > -dead && x < dead) return 0;
     if (x > 32767) x = 32767; if (x < -32767) x = -32767;
     return (int32_t)x;
-}
-static uint64_t xi_buttons(const XINPUT_GAMEPAD *g) {
-    uint64_t b = 0; WORD w = g->wButtons; int lab = abxy_label();
-    // by position (Xbox A is the bottom button, the Switch's B): A→B, B→A, X→Y, Y→X; by label: A→A ...
-    if (w & XINPUT_GAMEPAD_A) b |= lab ? DM_BTN_A : DM_BTN_B;
-    if (w & XINPUT_GAMEPAD_B) b |= lab ? DM_BTN_B : DM_BTN_A;
-    if (w & XINPUT_GAMEPAD_X) b |= lab ? DM_BTN_X : DM_BTN_Y;
-    if (w & XINPUT_GAMEPAD_Y) b |= lab ? DM_BTN_Y : DM_BTN_X;
-    if (w & XINPUT_GAMEPAD_LEFT_SHOULDER) b |= DM_BTN_L;
-    if (w & XINPUT_GAMEPAD_RIGHT_SHOULDER) b |= DM_BTN_R;
-    if (g->bLeftTrigger > 100) b |= DM_BTN_ZL;
-    if (g->bRightTrigger > 100) b |= DM_BTN_ZR;
-    if (w & XINPUT_GAMEPAD_LEFT_THUMB) b |= DM_BTN_LS;
-    if (w & XINPUT_GAMEPAD_RIGHT_THUMB) b |= DM_BTN_RS;
-    if (w & XINPUT_GAMEPAD_START) b |= DM_BTN_PLUS;
-    if (w & XINPUT_GAMEPAD_BACK) b |= DM_BTN_MINUS;
-    if (w & XINPUT_GAMEPAD_DPAD_LEFT) b |= DM_BTN_LEFT;
-    if (w & XINPUT_GAMEPAD_DPAD_UP) b |= DM_BTN_UP;
-    if (w & XINPUT_GAMEPAD_DPAD_RIGHT) b |= DM_BTN_RIGHT;
-    if (w & XINPUT_GAMEPAD_DPAD_DOWN) b |= DM_BTN_DOWN;
-    return b;
 }
 static void publish(void) {
     int32_t k[4]; for (int i = 0; i < 4; i++) k[i] = g_key_ax[i] * DM_STICK_MAX;
@@ -561,40 +550,35 @@ static void xinput_poll(void) {
         int was = g_xi_ok[i]; g_xi_ok[i] = r == ERROR_SUCCESS;
         if (g_xi_ok[i] != was) { LOG("controller %d %s (XInput)", i + 1, g_xi_ok[i] ? "connected" : "disconnected"); dm_haptics_route(i, g_xi_ok[i]); applied[i] = ~0u; }
         if (!g_xi_ok[i]) continue;
-        g_xi_btn[i] = xi_buttons(&xs.Gamepad);
+        g_xi_src[i] = xi_sources(&xs.Gamepad); g_xi_btn[i] = rm_pad_buttons(ovl_map(), g_xi_src[i]);
         { static DWORD seen[4]; if (xs.dwPacketNumber != seen[i]) { if (seen[i] && (g_xi_btn[i] || tilted(xi_axis(xs.Gamepad.sThumbLX, 8000), xi_axis(xs.Gamepad.sThumbLY, 8000)))) ovl_other_input(); seen[i] = xs.dwPacketNumber; } }
         g_xi_ax[i][0] = xi_axis(xs.Gamepad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE); g_xi_ax[i][1] = xi_axis(xs.Gamepad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
         g_xi_ax[i][2] = xi_axis(xs.Gamepad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE); g_xi_ax[i][3] = xi_axis(xs.Gamepad.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
         if (i) { dm_pad_set_player(i, g_xi_btn[i], g_xi_ax[i][0], g_xi_ax[i][1], g_xi_ax[i][2], g_xi_ax[i][3]); mask |= 1u << i; }
         uint32_t rv = atomic_load(&g_rumble[i]);
+        { double k = st_num("rumble", 1); if (k < 0) k = 0; if (k > 1) k = 1;   // the menu's rumble: on / weak / off
+          if (k < 1) rv = (uint32_t)((rv >> 16) * k) << 16 | (uint32_t)((rv & 0xffff) * k); }
         if (rv != applied[i]) { XINPUT_VIBRATION v = {(WORD)(rv >> 16), (WORD)(rv & 0xffff)}; XInputSetState((DWORD)i, &v); applied[i] = rv; }
     }
     if (now >= next_scan) next_scan = now + 500000000ull;
-    { static uint64_t was; uint64_t b = g_xi_ok[0] ? g_xi_btn[0] : 0; if (ovl_menu_open()) ovl_menu_pad(b & ~was); was = b; }   // the menu moves with the D-pad, A and B
+    { static uint32_t was; uint32_t b = g_xi_ok[0] ? g_xi_src[0] : 0; if (ovl_menu_open()) ovl_menu_pad(b & ~was); was = b; }   // the menu: the D-pad, A, B as pressed (not as mapped)
     dm_pad_players(mask);
     publish();
 }
+// The keyboard (the menu's Controls page maps it; Ryujinx's keys by default): its stick directions are held keys, -1 / 0 / 1 per axis
+static int g_key_held[8];   // remap.h's RM_LUP.. order: left up down left right, right up down left right
+static void key_axes(void) {
+    const int *h = g_key_held;
+    g_key_ax[0] = h[3] - h[2]; g_key_ax[1] = h[0] - h[1]; g_key_ax[2] = h[7] - h[6]; g_key_ax[3] = h[4] - h[5];
+}
 static int key_axis_set(WPARAM vk, int down) {
-    // WASD left stick, IJKL right stick
-    static int held[8];   // W A S D I J K L
-    int i = vk == 'W' ? 0 : vk == 'A' ? 1 : vk == 'S' ? 2 : vk == 'D' ? 3 : vk == 'I' ? 4 : vk == 'J' ? 5 : vk == 'K' ? 6 : vk == 'L' ? 7 : -1;
-    if (i < 0) return 0;
-    held[i] = down;
-    g_key_ax[0] = held[3] - held[1]; g_key_ax[1] = held[0] - held[2];
-    g_key_ax[2] = held[7] - held[5]; g_key_ax[3] = held[4] - held[6];
-    return 1;
+    int d[8], any = 0; rm_key_dirs(ovl_map(), (int)vk, d);
+    for (int i = 0; i < 8; i++) if (d[i]) { g_key_held[i] = down; any = 1; }
+    if (any) key_axes();
+    return any;
 }
-static uint64_t key_button(WPARAM vk) {
-    switch (vk) {
-    case 'Z': return DM_BTN_A; case 'X': return DM_BTN_B; case 'C': return DM_BTN_X; case 'V': return DM_BTN_Y;
-    case 'E': return DM_BTN_L; case 'U': return DM_BTN_R; case 'Q': return DM_BTN_ZL; case 'O': return DM_BTN_ZR;
-    case 'F': return DM_BTN_LS; case 'H': return DM_BTN_RS;
-    case VK_RETURN: case VK_OEM_PLUS: case VK_ADD: return DM_BTN_PLUS;
-    case VK_BACK: case VK_OEM_MINUS: case VK_SUBTRACT: return DM_BTN_MINUS;
-    case VK_LEFT: return DM_BTN_LEFT; case VK_UP: return DM_BTN_UP; case VK_RIGHT: return DM_BTN_RIGHT; case VK_DOWN: return DM_BTN_DOWN;
-    default: return 0;
-    }
-}
+static void keys_release(void) { g_key_btn = 0; memset(g_key_held, 0, sizeof g_key_held); key_axes(); }
+static uint64_t key_button(WPARAM vk) { return rm_key_buttons(ovl_map(), (int)vk); }
 // A long stall after the first frame (shaders compiling, a level loading): a note with a spinner over the picture, so a still picture does not look frozen
 static void stall_note(void) {
     static uint64_t seen_n, seen_at; uint64_t now = dm_win_mono_ns();
@@ -623,6 +607,7 @@ static void settings_env(void) {
 void front_setting_changed(const char *key) {
     if (!strcmp(key, "vsync")) { setenv("DM_VSYNC", st_str("vsync", "1"), 1); g_sc_stale = 1; }
     else if (!strcmp(key, "filter")) g_nearest = !_stricmp(st_str("filter", "linear"), "nearest");
+    else if (!strcmp(key, "rumble")) dm_haptics_set_enabled(st_num("rumble", 1) > 0);
     else if (!strcmp(key, "show_fps")) { g_show_fps = st_num("show_fps", 0) > 0; if (!g_show_fps) ovl_fps(NULL); }
 }
 static void close_game(void);
@@ -689,8 +674,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
                   if (now) { HANDLE t = CreateThread(NULL, 0, pc_save_thread, NULL, 0, NULL); if (t) CloseHandle(t); } } }   // minimized: the pipelines kept now, as Android does on a pause
         return 0;
     case WM_ACTIVATEAPP:
-        if (!w) { g_key_btn = 0; memset(g_key_ax, 0, sizeof g_key_ax); key_axis_set('W', 0); key_axis_set('A', 0); key_axis_set('S', 0); key_axis_set('D', 0);
-                  key_axis_set('I', 0); key_axis_set('J', 0); key_axis_set('K', 0); key_axis_set('L', 0); publish(); }
+        if (!w) { keys_release(); publish(); }
         if (game) dm_focus_set(w ? 1 : 2);
         return 0;
     case WM_SYSKEYDOWN:
@@ -700,8 +684,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int down = m == WM_KEYDOWN;
         if (down && w == VK_F11) { full_screen(!g_full); return 0; }
         if (down && w == VK_F1) { ovl_toggle(); publish(); return 0; }
-        if (down && w == VK_F2 && !ovl_menu_open()) { g_key_btn = 0; memset(g_key_ax, 0, sizeof g_key_ax); ovl_menu(1); publish(); return 0; }
-        if (ovl_menu_open()) { if (down) ovl_menu_key(w); publish(); return 0; }
+        if (down && w == VK_F2 && !ovl_menu_open()) { keys_release(); ovl_menu(1); publish(); return 0; }
+        if (ovl_menu_open()) { if (down) ovl_menu_key(w); if (!ovl_menu_open()) keys_release(); publish(); return 0; }
         if (down && w == VK_ESCAPE && g_full) { full_screen(0); return 0; }
         if (key_axis_set(w, down)) { if (down) ovl_other_input(); publish(); return 0; }
         uint64_t b = key_button(w);
@@ -757,7 +741,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     vk_driver_dirs(g_dir, g_data);
     vk_driver_game(game_arg ? game_arg : g_game, DM_GAME_ID);
     vk_start_game(g_data);
-    { const char *on = getenv("DM_RUMBLE"); dm_haptics_init(rumble_sink, !on || atoi(on) != 0); }
+    dm_haptics_init(rumble_sink, st_num("rumble", 1) > 0);   // settings.ini rumble (or DM_RUMBLE): 1 on, 0.5 weak, 0 off; the menu changes it live
 
     WNDCLASSEXW wc = {sizeof wc, CS_OWNDC, wnd_proc, 0, 0, inst, LoadIconW(inst, MAKEINTRESOURCEW(1)), LoadCursorW(NULL, (LPCWSTR)IDC_ARROW), NULL, NULL, L"nxnative", NULL};
     if (!wc.hIcon) wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
@@ -786,7 +770,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         if (!frame_draw()) { static uint64_t last; uint64_t now = dm_win_mono_ns(); if (now - last > 33000000ull) { last = now; status_draw(); } }   // the loader, 30 times a second
         stall_note(); fps_note();
         { static double at = -1; if (at < 0) { const char *e = getenv("DM_OPEN_MENU_AFTER"); at = e ? atof(e) : 0; }   // CI: the menu's picture
-          if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = 0; ovl_menu(1); } }
+          if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = -2; ovl_menu(1); }
+          else if (at == -2 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > atof(getenv("DM_OPEN_MENU_AFTER")) + 3) {   // then its Controls page, as the arrows and Enter go there
+              at = 0; for (int k = 0; k < 3; k++) ovl_menu_key(VK_UP); ovl_menu_key(VK_RETURN); } }
         ovl_follow();
         vk_start_tick();
     }

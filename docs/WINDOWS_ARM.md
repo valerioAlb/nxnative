@@ -167,11 +167,11 @@ Faster disks and no scanning:
 - **CPU tuning.** The host is compiled with `-mtune=oryon-1` (Snapdragon X). It uses only the armv8.2-a instructions every Windows on Arm PC has.
   `DM_CPU=oryon-1` (environment) also enables Snapdragon X's newer instructions; such a build then runs only there. `DM_TUNE=` (empty) keeps the compiler's default.
 
-Controls:
+Controls (the defaults; F2 → Controls changes them):
 
 | Control | Input |
 |---|---|
-| Xbox / XInput pads | players 1-4; positional A/B/X/Y (`DM_PAD_ABXY=label` for by label) |
+| Xbox / XInput pads | players 1-4, with rumble; positional A/B/X/Y (`pad_abxy=label` for by label) |
 | Left stick | WASD |
 | Right stick | IJKL |
 | D-pad | arrows |
@@ -227,6 +227,35 @@ Example: `touch.a=-0.12,-0.6,0.07` makes A bigger, and `touch.ls=0,0,0` hides th
 Until the first frame the window shows a loader: the game's name, a spinner, the current phase (modules, memory, graphics,
 pipeline cache...), the elapsed time and the number of shaders and pipelines compiled so far. When the picture stops changing
 for a few seconds later on (a level loading, shaders compiling), a small "Still working" note with a spinner appears at the top.
+
+### Controls: changing the keys and buttons, rumble
+
+F2 → **Controls** lists the Switch's buttons with their keyboard key and Xbox controller button. Choose a row (tap, click, or
+arrows + Enter, or the D-pad + A), then press the key or the controller button it should have. Esc keeps the old one and Delete
+leaves the button without one. A key or button already used elsewhere is swapped, so nothing is lost. The two "stick" rows ask
+for the keyboard's four direction keys in turn (up, down, left, right). In the menu the controller always works as pressed
+(D-pad, A, B), whatever the mapping, so a wrong mapping can still be fixed.
+
+"Changes are saved for" picks **this game** (`%LOCALAPPDATA%\nxnative\<title ID>\settings.ini`) or **every game**
+(`%LOCALAPPDATA%\nxnative\settings.ini`; a game's own setting wins). "Reset to the defaults" (tap twice) clears the chosen one.
+The lines can also be written by hand:
+
+| Key | Value | Example |
+|---|---|---|
+| `key.<button>` | key names separated by spaces, or `none`. Buttons: `a b x y l r zl zr ls rs plus minus up down left right lstick_up lstick_down lstick_left lstick_right rstick_up ...`. Keys: letters, digits, `Enter Space Tab Backspace Shift Ctrl Alt Up Down Left Right Num0`..`Num9` `Num+ Num- F3`..`F24` `; + , - . /`, or a code like `0xDE` | `key.a=Space K` |
+| `pad.<Xbox input>` | a Switch button (above, not the stick directions) or `none`. Inputs: `a b x y lb rb lt rt ls rs start back up down left right` | `pad.a=a` |
+| `pad_abxy` | `position` (Xbox A = the Switch's B, the default) or `label` (Xbox A = A): the default Xbox mapping | `pad_abxy=label` |
+| `rumble` | `1`, `0.5` (weak), `0` (off); the menu changes it at once | `rumble=0.5` |
+
+F1, F2, F11 and Esc stay the program's own keys.
+
+### A faster second start (pipeline cache)
+
+The Vulkan pipelines the driver compiles are kept in `%LOCALAPPDATA%\nxnative\<title ID>\cache\pipeline.cache.*`, so the second
+start skips most of the compiling. The file is written every 64 new pipelines (at most every 15 s), when the window is minimized,
+and when the game closes; always through a temporary file, so a crash never leaves half a cache. At start its header is checked
+against the GPU and driver (vendor, device and the driver's cache UUID): after a driver update, or with a damaged file, the log says
+`[vk] pipeline cache ... another driver version's` and it starts empty, then fills again.
 
 ## Tested so far
 

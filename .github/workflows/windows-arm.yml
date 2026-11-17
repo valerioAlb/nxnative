@@ -44,8 +44,10 @@ jobs:
           cmake -G Ninja -S dm/windows -B build/host -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DGAME=$GAME
           ninja -C build/host -k 0 dmhost_app dmhost_cli 2>&1 | tee build/host.log
           test -f build/host/dmhost.exe && test -f build/host/dmhost_cli.exe
-      - name: Touch controls (dm/windows/touchpad.c) on the build machine
-        run: cc -O1 -Wall -Werror -I dm/host -I dm/windows dm/windows/tests/t_touchpad.c dm/windows/touchpad.c -lm -o build/t_touchpad && build/t_touchpad
+      - name: Touch controls and button mapping (dm/windows/touchpad.c, remap.c) on the build machine
+        run: |
+          cc -O1 -Wall -Werror -I dm/host -I dm/windows dm/windows/tests/t_touchpad.c dm/windows/touchpad.c -lm -o build/t_touchpad && build/t_touchpad
+          cc -O1 -Wall -Wextra -Werror -I dm/host -I dm/windows dm/windows/tests/t_remap.c dm/windows/remap.c -o build/t_remap && build/t_remap
       - name: Rewriter for Windows (DM_TARGET=windows) on the synthetic module
         env:
           DM_SELFTEST_OUT: build/selftest
@@ -104,7 +106,7 @@ jobs:
             if ($case -eq 'selftest') { $env:DM_OVL_DUMP = $d } else { Remove-Item Env:DM_OVL_DUMP -ErrorAction SilentlyContinue }
             $p = Start-Process -FilePath "$d/dmhost.exe" -WorkingDirectory $d -PassThru
             $done = $p.WaitForExit(25000)
-            if ($case -eq 'selftest') { Copy-Item "$d/ovl_*.bmp" . -ErrorAction SilentlyContinue; if (-not (Test-Path "ovl_menu.bmp")) { $fail += "selftest : no picture of the settings menu (DM_OVL_DUMP)" } }
+            if ($case -eq 'selftest') { Copy-Item "$d/ovl_*.bmp" . -ErrorAction SilentlyContinue; foreach ($pic in 'ovl_menu.bmp', 'ovl_menu_controls.bmp') { if (-not (Test-Path $pic)) { $fail += "selftest : no $pic (DM_OVL_DUMP: the settings menu and its Controls page)" } } }
             if (-not $done) { $p.Kill(); $p.WaitForExit(); $how = 'still running after 25 s (killed)' } else { $how = 'exited with {0:X8}' -f $p.ExitCode }
             Write-Host "== $case : $how"
             Get-ChildItem $d | Select-Object Name, Length | Format-Table | Out-String | Write-Host

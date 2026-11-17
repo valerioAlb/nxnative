@@ -3,6 +3,7 @@
 //   touch_overlay  auto (default: shown on a touch, hidden when a key or the controller is used; hidden at start on a PC without a touch screen), on, off. F1 switches on / off
 //   touch_opacity  0..1 (0.6), touch_scale 0.5..2 (1), touch.<control>=x,y[,r] to move one (units of the window's shorter side, negative from the right / bottom; r 0 hides it):
 //   lstick rstick dpad a b x y l r zl zr plus minus ls rs
+// The settings menu (F2) is here too, with its Controls page (remap.h: key.<button>=..., pad.<Xbox input>=...)
 #include "winfront.h"
 #include "touchpad.h"
 #include "dm.h"
@@ -49,7 +50,9 @@ static void gt_down(uint32_t pid, float px, float py) {
 static int gt_move(uint32_t pid, float px, float py) { int i = gt_find(pid); if (i < 0) return 0; to_game(px, py, &g_gt[i].x, &g_gt[i].y); game_touch_send(); return 1; }
 static int gt_up(uint32_t pid) { int i = gt_find(pid); if (i < 0) return 0; g_gt[i].used = 0; game_touch_send(); return 1; }
 
+static void load_map(void);
 static void load_layout(void) {
+    load_map();
     tp_init(&g_pad);
     tp_set(&g_pad, "opacity", st_str("touch_opacity", "0.6"));
     tp_set(&g_pad, "scale", st_str("touch_scale", "1"));
@@ -120,10 +123,38 @@ static const mitem k_menu[] = {
     {"touch_overlay", "Touch controls", {"auto", "on", "off"}, {"auto", "on", "off"}, 1, "F1 too"},
     {"touch_opacity", "Touch controls' opacity", {"0.6", "0.8", "0.45", "0.3"}, {"60%", "80%", "45%", "30%"}, 1, NULL},
     {"touch_scale", "Touch controls' size", {"1", "1.2", "0.85"}, {"100%", "120%", "85%"}, 1, NULL},
+    {"rumble", "Controller rumble", {"1", "0.5", "0"}, {"on", "weak", "off"}, 1, "Xbox controllers (XInput)"},
 };
-enum { NM = sizeof k_menu / sizeof k_menu[0], M_RESTART = NM, M_CLOSE = NM + 1, M_ROWS = NM + 2 };
-static int g_menu, g_sel, g_restart_due;
+enum { NM = sizeof k_menu / sizeof k_menu[0], M_CONTROLS = NM, M_RESTART = NM + 1, M_CLOSE = NM + 2, M_ROWS = NM + 3 };
+// The Controls page: the Switch's 16 buttons, the keyboard's two sticks (four keys each, asked in turn), where changes go, reset, back
+enum { C_STICK_L = RM_NBTN, C_STICK_R, C_SCOPE, C_RESET, C_BACK, C_ROWS };
+static int g_menu, g_sel, g_restart_due, g_page, g_csel;
+static int g_cap = -1, g_cap_step, g_scope, g_reset_armed;   // g_cap: the row waiting for a key / button; g_scope 1: changes for every game
+static rm_map g_map;
 static char g_fps[48];
+const rm_map *ovl_map(void) { return &g_map; }
+static void load_map(void) {
+    const char *ab = st_get("pad_abxy"); rm_defaults(&g_map, ab && !_stricmp(ab, "label"));
+    const char *k, *v;
+    for (int i = 0; st_each(i, &k, &v); i++) if ((!_strnicmp(k, "key.", 4) || !_strnicmp(k, "pad.", 4)) && !rm_set(&g_map, k, v)) LOG("[RED] settings.ini: %s=%s is not a key / controller mapping (docs/WINDOWS_ARM.md)", k, v);
+}
+static void save_map_diff(const rm_map *was) {   // the mappings that changed, to this game's settings or every game's
+    char v[64];
+    for (int a = 0; a < RM_NACT; a++) if (memcmp(was->key[a], g_map.key[a], sizeof g_map.key[a])) {
+        char k[40]; snprintf(k, sizeof k, "key.%s", rm_act_name[a]); rm_key_str(&g_map, a, v, sizeof v); st_put_scope(k, v[0] ? v : "none", g_scope);
+        LOG("controls: %s = %s (%s)", k, v[0] ? v : "none", g_scope ? "every game" : "this game");
+    }
+    for (int s = 0; s < RM_NSRC; s++) if (was->pad[s] != g_map.pad[s]) {
+        char k[40]; snprintf(k, sizeof k, "pad.%s", rm_src_name[s]); const char *t = g_map.pad[s] >= 0 ? rm_act_name[g_map.pad[s]] : "none"; st_put_scope(k, t, g_scope);
+        LOG("controls: %s = %s (%s)", k, t, g_scope ? "every game" : "this game");
+    }
+}
+static void reset_map(void) {
+    char k[40];
+    for (int a = 0; a < RM_NACT; a++) { snprintf(k, sizeof k, "key.%s", rm_act_name[a]); st_put_scope(k, NULL, g_scope); }
+    for (int s = 0; s < RM_NSRC; s++) { snprintf(k, sizeof k, "pad.%s", rm_src_name[s]); st_put_scope(k, NULL, g_scope); }
+    load_map(); LOG("controls: %s's mappings reset", g_scope ? "every game" : "this game");
+}
 static int cur_val(int i) {
     const char *v = st_get(k_menu[i].key); if (!v) v = "";
     for (int k = 0; k < 6 && k_menu[i].vals[k]; k++) if (!strcmp(v, k_menu[i].vals[k])) return k;
@@ -144,12 +175,50 @@ static void menu_change(int i, int dir) {
 static void menu_activate(int i) {
     if (i == M_CLOSE) { ovl_menu(0); return; }
     if (i == M_RESTART) { if (g_restart_due) front_restart(); return; }
+    if (i == M_CONTROLS) { g_page = 1; g_cap = -1; g_reset_armed = 0; return; }
     menu_change(i, 1);
 }
-void ovl_menu(int open) { if (g_menu != open) { g_menu = open; g_pad.dirty = 1; tp_release_all(&g_pad); LOG("settings menu %s", open ? "open (F2 / Esc closes)" : "closed"); } }
+static void controls_activate(int r) {
+    if (r != C_RESET) g_reset_armed = 0;
+    if (r < C_SCOPE) { g_cap = r; g_cap_step = 0; }
+    else if (r == C_SCOPE) g_scope = !g_scope;
+    else if (r == C_RESET) { if (g_reset_armed) { reset_map(); g_reset_armed = 0; } else g_reset_armed = 1; }
+    else { g_page = 0; g_cap = -1; }
+}
+static void capture_key(int vk) {   // the key for the row being asked; a stick row asks for up, down, left, right in turn
+    int act = g_cap < RM_NBTN ? g_cap : (g_cap == C_STICK_L ? RM_LUP : RM_RUP) + g_cap_step;
+    rm_map was = g_map;
+    if (vk == VK_DELETE) {
+        if (g_cap < RM_NBTN) rm_clear(&g_map, act); else for (int d = 0; d < 4; d++) rm_clear(&g_map, (g_cap == C_STICK_L ? RM_LUP : RM_RUP) + d);
+        save_map_diff(&was); g_cap = -1; return;
+    }
+    if (rm_bind_key(&g_map, act, vk) == -1 && g_map.key[act][0] != vk) return;   // a key of the program's own (F1, F2, F11)
+    save_map_diff(&was);
+    if (g_cap >= RM_NBTN && ++g_cap_step < 4) return;
+    g_cap = -1;
+}
+void ovl_menu(int open) {
+    if (g_menu != open) { g_menu = open; g_page = 0; g_cap = -1; g_reset_armed = 0; g_pad.dirty = 1; tp_release_all(&g_pad); LOG("settings menu %s", open ? "open (F2 / Esc closes)" : "closed"); }
+}
 int ovl_menu_open(void) { return g_menu; }
 int ovl_menu_key(WPARAM vk) {
     if (!g_menu) return 0;
+    g_pad.dirty = 1;
+    if (g_page == 1 && g_cap >= 0) {   // waiting for a key: Esc gives up, Delete clears the row
+        if (vk == VK_ESCAPE) g_cap = -1; else if (vk != VK_F2 && vk != VK_F1 && vk != VK_F11) capture_key((int)vk);
+        return 1;
+    }
+    if (g_page == 1) {
+        switch (vk) {
+        case VK_UP: g_csel = (g_csel + C_ROWS - 1) % C_ROWS; break;
+        case VK_DOWN: g_csel = (g_csel + 1) % C_ROWS; break;
+        case VK_LEFT: case VK_RIGHT: if (g_csel == C_SCOPE) g_scope = !g_scope; break;
+        case VK_RETURN: case VK_SPACE: controls_activate(g_csel); break;
+        case VK_ESCAPE: case VK_BACK: g_page = 0; break;
+        case VK_F2: ovl_menu(0); break;
+        }
+        return 1;
+    }
     switch (vk) {
     case VK_UP: g_sel = (g_sel + M_ROWS - 1) % M_ROWS; break;
     case VK_DOWN: g_sel = (g_sel + 1) % M_ROWS; break;
@@ -159,36 +228,78 @@ int ovl_menu_key(WPARAM vk) {
     case VK_ESCAPE: case VK_F2: case VK_BACK: ovl_menu(0); break;
     default: return 1;   // every other key stays out of the game while the menu is open
     }
-    g_pad.dirty = 1; return 1;
+    return 1;
 }
-void ovl_menu_pad(uint64_t p) {
+// The controller's inputs as pressed, not as mapped (a mapping that went wrong can still be fixed): D-pad moves, A chooses, B goes back, Menu closes.
+// While a row waits, the first input pressed becomes that button
+void ovl_menu_pad(uint32_t p) {
     if (!g_menu || !p) return;
-    if (p & DM_BTN_UP) ovl_menu_key(VK_UP);
-    if (p & DM_BTN_DOWN) ovl_menu_key(VK_DOWN);
-    if (p & DM_BTN_LEFT) ovl_menu_key(VK_LEFT);
-    if (p & DM_BTN_RIGHT) ovl_menu_key(VK_RIGHT);
-    if (p & DM_BTN_A) ovl_menu_key(VK_RETURN);
-    if (p & (DM_BTN_B | DM_BTN_PLUS)) ovl_menu(0);
+    if (g_page == 1 && g_cap >= 0) {
+        if (g_cap >= RM_NBTN) return;   // the keyboard's sticks: keys only
+        for (int s = 0; s < RM_NSRC; s++) if (p >> s & 1) { rm_map was = g_map; rm_bind_pad(&g_map, g_cap, s); save_map_diff(&was); g_cap = -1; g_pad.dirty = 1; return; }
+    }
+    if (p & 1u << 12) ovl_menu_key(VK_UP);
+    if (p & 1u << 13) ovl_menu_key(VK_DOWN);
+    if (p & 1u << 14) ovl_menu_key(VK_LEFT);
+    if (p & 1u << 15) ovl_menu_key(VK_RIGHT);
+    if (p & 1u << 0) ovl_menu_key(VK_RETURN);
+    if (p & 1u << 1) { if (g_page == 1) { g_page = 0; g_pad.dirty = 1; } else ovl_menu(0); }
+    if (p & 1u << 10) ovl_menu(0);
 }
 void ovl_fps(const char *t) { if (!t) { if (g_fps[0]) { g_fps[0] = 0; g_pad.dirty = 1; } return; } if (strcmp(t, g_fps)) { snprintf(g_fps, sizeof g_fps, "%s", t); g_pad.dirty = 1; } }
-// The panel's geometry: u (a unit), its rectangle and row height
+// The panel's geometry: u (a unit), its rectangle and row height; rows start 1.6 rows down and a note line follows them
+static int page_rows(void) { return g_page ? C_ROWS : M_ROWS; }
 static void menu_geom(float *u, float *x0, float *y0, float *w, float *rh) {
-    float s = (float)(g_bw < g_bh ? g_bw : g_bh); *u = s / 30; *rh = *u * 1.55f;
-    *w = *u * 30; if (*w > (float)g_bw * 0.94f) *w = (float)g_bw * 0.94f;
-    float h = *rh * (M_ROWS + 2.2f); *x0 = ((float)g_bw - *w) / 2; *y0 = ((float)g_bh - h) / 2; if (*y0 < 0) *y0 = 0;
+    float s = (float)(g_bw < g_bh ? g_bw : g_bh); *u = s / 30; *rh = *u * (g_page ? 1.12f : 1.4f);
+    *w = *u * (g_page ? 34 : 30); if (*w > (float)g_bw * 0.96f) *w = (float)g_bw * 0.96f;
+    float h = *rh * (page_rows() + 2.2f); *x0 = ((float)g_bw - *w) / 2; *y0 = ((float)g_bh - h) / 2; if (*y0 < 0) *y0 = 0;
 }
 static int menu_row_at(float px, float py, int *side) {
-    float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh);
+    float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh); int n = page_rows();
     if (px < x0 || px > x0 + w) return -2;
     int r = (int)floorf((py - (y0 + rh * 1.6f)) / rh);
-    if (py < y0 || r >= M_ROWS) return py < y0 || py > y0 + rh * (M_ROWS + 2.2f) ? -2 : -1;
+    if (py < y0 || r >= n) return py < y0 || py > y0 + rh * (n + 2.2f) ? -2 : -1;
     if (r < 0) return -1;
     *side = px < x0 + w * 0.62f ? 0 : px < x0 + w * 0.77f ? -1 : 1; return r;
+}
+static void controls_draw(float u, float x0, float y0, float w, float rh) {
+    int ts = (int)(u * 0.6f);
+    text_at("Controls", (int)(x0 + u), (int)(y0 + rh * 0.75f), (int)(u * 1.0f), 1, 1);
+    text_at("Keyboard", (int)(x0 + w * 0.40f), (int)(y0 + rh * 1.2f), (int)(u * 0.5f), 0.6f, 1);
+    text_at("Controller (Xbox)", (int)(x0 + w * 0.68f), (int)(y0 + rh * 1.2f), (int)(u * 0.5f), 0.6f, 1);
+    for (int r = 0; r < C_ROWS; r++) {
+        float ry = y0 + rh * (1.6f + r), cy = ry + rh / 2;
+        if (r == g_csel || r == g_cap) tp_rect(g_px, g_bw, g_bh, x0 + u * 0.4f, ry + 1, x0 + w - u * 0.4f, ry + rh - 1, u * 0.35f, r == g_cap ? 0xA66E2E : 0x2E6EA6, 0.85f);
+        char k[80], p[80];
+        if (r < RM_NBTN) {
+            text_at(rm_act_label[r], (int)(x0 + u), (int)cy, ts, 0.95f, 1);
+            rm_key_str(&g_map, r, k, sizeof k); rm_pad_str(&g_map, r, p, sizeof p);
+            text_at(k[0] ? k : "\xE2\x80\x94", (int)(x0 + w * 0.40f), (int)cy, ts, 0.95f, 1);
+            text_at(p[0] ? p : "\xE2\x80\x94", (int)(x0 + w * 0.68f), (int)cy, ts, 0.95f, 1);
+        } else if (r <= C_STICK_R) {
+            int base = r == C_STICK_L ? RM_LUP : RM_RUP; char b[4][24]; size_t l = 0; k[0] = 0;
+            for (int d = 0; d < 4; d++) { rm_key_str(&g_map, base + d, b[d], sizeof b[d]); char *sp = strchr(b[d], ' '); if (sp) *sp = 0; }
+            l = (size_t)snprintf(k, sizeof k, "%s %s %s %s", b[0][0] ? b[0] : "-", b[2][0] ? b[2] : "-", b[1][0] ? b[1] : "-", b[3][0] ? b[3] : "-"); (void)l;
+            text_at(r == C_STICK_L ? "Left stick (up left down right)" : "Right stick (up left down right)", (int)(x0 + u), (int)cy, ts, 0.95f, 1);
+            text_at(k, (int)(x0 + w * 0.40f), (int)cy, ts, 0.95f, 1);
+            text_at("the controller's sticks", (int)(x0 + w * 0.68f), (int)cy, ts, 0.5f, 1);
+        } else if (r == C_SCOPE) {
+            text_at("Changes are saved for", (int)(x0 + u), (int)cy, ts, 0.95f, 1);
+            text_at(g_scope ? "\u2039  every game  \u203a" : "\u2039  this game  \u203a", (int)(x0 + w * 0.40f), (int)cy, ts, 0.95f, 1);
+        } else if (r == C_RESET) text_at(g_reset_armed ? (g_scope ? "Again to reset every game's mappings" : "Again to reset this game's mappings") : "Reset to the defaults", (int)(x0 + u), (int)cy, ts, g_reset_armed ? 1.0f : 0.95f, 1);
+        else text_at("Back", (int)(x0 + u), (int)cy, ts, 0.95f, 1);
+    }
+    const char *note = "Choose a row, then press the key or controller button for it";
+    char nb[160];
+    if (g_cap >= 0 && g_cap < RM_NBTN) { snprintf(nb, sizeof nb, "Press a key or controller button for %s   (Esc: keep it, Delete: none)", rm_act_label[g_cap]); note = nb; }
+    else if (g_cap >= 0) { static const char *const dn[4] = {"up", "down", "left", "right"}; snprintf(nb, sizeof nb, "Press the key for %s %s   (Esc: stop, Delete: none)", g_cap == C_STICK_L ? "left stick" : "right stick", dn[g_cap_step]); note = nb; }
+    text_at(note, (int)(x0 + u), (int)(y0 + rh * (C_ROWS + 1.75f)), (int)(u * 0.55f), g_cap >= 0 ? 1.0f : 0.65f, 1);
 }
 static void menu_draw(void) {
     float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh);
     tp_rect(g_px, g_bw, g_bh, 0, 0, (float)g_bw, (float)g_bh, 0, 0x000000, 0.45f);
-    tp_rect(g_px, g_bw, g_bh, x0, y0, x0 + w, y0 + rh * (M_ROWS + 2.2f), u * 0.8f, 0x14181E, 0.94f);
+    tp_rect(g_px, g_bw, g_bh, x0, y0, x0 + w, y0 + rh * (page_rows() + 2.2f), u * 0.8f, 0x14181E, 0.94f);
+    if (g_page == 1) { controls_draw(u, x0, y0, w, rh); return; }
     text_at("Settings", (int)(x0 + u), (int)(y0 + rh * 0.8f), (int)(u * 1.05f), 1, 1);
     text_at("F2 / Esc / B closes", (int)(x0 + w - u * 9), (int)(y0 + rh * 0.8f), (int)(u * 0.55f), 0.55f, 1);
     for (int r = 0; r < M_ROWS; r++) {
@@ -196,12 +307,14 @@ static void menu_draw(void) {
         if (r == g_sel) tp_rect(g_px, g_bw, g_bh, x0 + u * 0.4f, ry + 2, x0 + w - u * 0.4f, ry + rh - 2, u * 0.4f, 0x2E6EA6, 0.85f);
         if (r < NM) {
             int k = cur_val(r);
-            text_at(k_menu[r].label, (int)(x0 + u), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+            text_at(k_menu[r].label, (int)(x0 + u), (int)cy, (int)(u * 0.68f), 0.95f, 1);
             char v[64]; snprintf(v, sizeof v, "\u2039  %s  \u203a%s", k_menu[r].names[k], k_menu[r].live ? "" : " *");
-            text_at(v, (int)(x0 + w * 0.62f), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+            text_at(v, (int)(x0 + w * 0.62f), (int)cy, (int)(u * 0.68f), 0.95f, 1);
+        } else if (r == M_CONTROLS) {
+            text_at("Controls (keyboard and controller buttons)  \u203a", (int)(x0 + u), (int)cy, (int)(u * 0.68f), 0.95f, 1);
         } else if (r == M_RESTART) {
-            text_at(g_restart_due ? "Restart the game now to apply *" : "* applies at the next start", (int)(x0 + u), (int)cy, (int)(u * 0.72f), g_restart_due ? 1.0f : 0.5f, 1);
-        } else text_at("Close", (int)(x0 + u), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+            text_at(g_restart_due ? "Restart the game now to apply *" : "* applies at the next start", (int)(x0 + u), (int)cy, (int)(u * 0.68f), g_restart_due ? 1.0f : 0.5f, 1);
+        } else text_at("Close", (int)(x0 + u), (int)cy, (int)(u * 0.68f), 0.95f, 1);
     }
     if (g_sel < NM && k_menu[g_sel].note) text_at(k_menu[g_sel].note, (int)(x0 + u), (int)(y0 + rh * (M_ROWS + 1.75f)), (int)(u * 0.55f), 0.65f, 1);
 }
@@ -230,9 +343,9 @@ static void draw(void) {
         text_at(g_badge, (int)(x0 + (float)u * 2.1f), (int)cy, (int)((float)u * 0.62f), 0.95f, 1);
     }
     {   // DM_OVL_DUMP=<folder>: the first picture of the controls and of the menu as BMP files (CI looks at them: its desktop is covered by the set-up screen)
-        static int dumped[2]; const char *dd = getenv("DM_OVL_DUMP"); int k = g_menu ? 1 : 0;
+        static int dumped[3]; const char *dd = getenv("DM_OVL_DUMP"); int k = g_menu ? 1 + g_page : 0;
         if (dd && *dd && !dumped[k] && (g_menu || g_visible)) {
-            dumped[k] = 1; char fn[700]; snprintf(fn, sizeof fn, "%s/ovl_%s.bmp", dd, k ? "menu" : "controls"); FILE *f = fopen(fn, "wb");
+            dumped[k] = 1; char fn[700]; snprintf(fn, sizeof fn, "%s/ovl_%s.bmp", dd, k == 2 ? "menu_controls" : k ? "menu" : "controls"); FILE *f = fopen(fn, "wb");
             if (f) {
                 uint32_t isz = (uint32_t)g_bw * (uint32_t)g_bh * 4u, hdr[13] = {0};
                 uint8_t fh[14] = {'B', 'M'}; uint32_t fsz = 14 + 40 + isz, off = 54; memcpy(fh + 2, &fsz, 4); memcpy(fh + 10, &off, 4);
@@ -281,7 +394,11 @@ enum { MOUSE = 0xFFFF0000u };
 static void ptr_down(uint32_t pid, float x, float y, int is_touch) {
     if (g_menu) {   // a tap on a row: the left part changes it forward, the arrows' halves back / forward; outside the panel closes it
         int side = 0, r = menu_row_at(x, y, &side);
-        if (r == -2) ovl_menu(0);
+        if (g_page == 1) {   // Controls: a tap on a row asks for its key / button (again: stops asking); outside the panel goes back
+            if (r == -2) { g_page = 0; g_cap = -1; }
+            else if (r >= 0) { if (g_cap == r) g_cap = -1; else { g_cap = -1; g_csel = r; controls_activate(r); } }
+        }
+        else if (r == -2) ovl_menu(0);
         else if (r >= 0) { g_sel = r; if (r < NM) menu_change(r, side < 0 ? -1 : 1); else menu_activate(r); }
         g_pad.dirty = 1; return;
     }
