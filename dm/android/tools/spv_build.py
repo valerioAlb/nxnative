@@ -12,9 +12,13 @@
 # The code areas, the job lists and the translator's output go in a temporary folder under WORK (build_android_from_nsp.py sets it to <id>_build/tmp), which the run
 # removes however it ends: for a big game it holds tens of GB, so it stays on the game's drive, beside its other files, and a failed run leaves nothing behind.
 # A run that had shaders to translate and translated none of them stops (none_made): the build must not pack the game without them.
-# Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
+# Batches (--batch, DM_SPV_BATCH): the shaders go through the translator, its integer-input pass and the post-pass a batch at a time, each batch's results landing in
+# <out dir> before the next starts. A run that stops (closed, killed, a full disk) keeps every finished batch, and the next run takes only the shaders not there yet;
+# the temporary folder holds one batch's code areas and output instead of the whole game's (Pokémon Pokopia's: tens of GB). The code areas are written as their batch
+# starts, by several threads. -j translator processes at once (default: every core), each given a share of the batch in one job list (one process start per share).
+# Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N] [--batch N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, contextlib, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, threading, time
+import argparse, concurrent.futures as cf, contextlib, errno, hashlib, io, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -26,9 +30,12 @@ def meshemu_v():   # spv_meshemu.VERSION, the compute form's (a res.json mesh_em
     return spv_meshemu.VERSION
 
 
-def records(d):
+def spans(d):   # the records' (start, end) in a package file
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
-    return [d[x:(r[k + 1] if k + 1 < len(r) else len(d))] for k, x in enumerate(r)]
+    return [(x, r[k + 1] if k + 1 < len(r) else len(d)) for k, x in enumerate(r)]
+
+def records(d):
+    return [d[x:y] for x, y in spans(d)]
 
 def split(rec):   # → (code area, control section)
     nctl, ncode = struct.unpack_from('<2I', rec, 0x28)
@@ -114,8 +121,9 @@ def job(key, stage, code, ctl, w, facts):
             if any(code[0x30:0x100]): return None, 'compute code area +0x30..+0x100 is not all zero'
             body = code[0x100:]
         else: body = code
-    p = Path(w) / f'{key}.bin'; p.write_bytes(body)
-    j = {'key': key, 'stage': 'cs' if stage in ('ts', 'ms') else stage, 'code': str(p), 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), 'softfloat64': True, **extra,
+    p = Path(w) / f'{key}.bin' if w is not None else None   # None: the job's fields only (translate's first look); its batch writes the code area
+    if p is not None: p.write_bytes(body)
+    j = {'key': key, 'stage': 'cs' if stage in ('ts', 'ms') else stage, 'code': str(p) if p is not None else None, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), 'softfloat64': True, **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # dmsh_build.py's options and defaults: the chain is tested with them
     if key in facts: j.update(facts[key])
     else: j['no_facts'] = True
@@ -218,14 +226,14 @@ ROOM_SPARE = 2 << 30   # left free besides: the log, the app, the copy to the ph
 def same_drive(a, b):
     return os.stat(a).st_dev == os.stat(b).st_dev
 
-def room(out, tmp, n, nbytes, reused):
+def room(out, tmp, n, nbytes, reused, batch=0):
     """Stop before translating n shaders (nbytes of records) when the drives can't hold what the run makes: their translated files beside out, less reused (the files of an
     older chain they overwrite), and the translator's output in tmp until the run ends (the code areas are written already). Pokopia's disk filled about 12 minutes into
     the translation, and with nothing checked the run went on for 20 more (droidplay-core#307). DM_SPV_SPACE_CHECK=0 skips it"""
     if not n or os.environ.get('DM_SPV_SPACE_CHECK') == '0': return
-    need_out, need_tmp = max(0, nbytes * OUT_PER_BYTE - reused), nbytes * TEMP_PER_BYTE
+    need_out, need_tmp = max(0, nbytes * OUT_PER_BYTE - reused), nbytes * TEMP_PER_BYTE * (min(1.0, batch / n) if batch else 1)   # the temporary folder holds one batch at a time
     gb = lambda b: f'{b / 1e9:.1f} GB'
-    parts = {'out': f'{gb(need_out)} for the translated shaders', 'tmp': f"{gb(need_tmp)} for the translator's temporary copy of them until the end"}
+    parts = {'out': f'{gb(need_out)} for the translated shaders', 'tmp': f"{gb(need_tmp)} for the translator's temporary copy of {'one batch of them' if batch and batch < n else 'them until the end'}"}
     for d, need, what in ([(out, need_out + need_tmp, f"{parts['out']} and {parts['tmp']}")] if same_drive(out, tmp) else
                           [(out, need_out, parts['out']), (tmp, need_tmp, parts['tmp'])]):
         free = shutil.disk_usage(d).free
@@ -245,6 +253,7 @@ def work_dir():
     for old in Path(d).glob('spv_*'): shutil.rmtree(old, ignore_errors=True)
     return d
 
+READ_COUNT_MIN = 256 << 20   # a package this large gets a counted step for its first read (MB)
 PROGRESS_SECS = 10   # how often the first pass says how far it got: build_android_from_nsp.py shows the count, and a game with a very large shader set (Pokopia) translates for hours
 
 
@@ -253,11 +262,11 @@ def translated(tout):   # the shaders the translator has finished so far in this
     except OSError: return 0
 
 
-def progress(tout, total, stop, count=None):   # 'progress: <done>/<total>' every PROGRESS_SECS while the first pass runs, when the count moved (droidplay-core#307: hours with nothing to show)
+def progress(tout, total, stop, count=None, unit=''):   # 'progress: <done>/<total>' every PROGRESS_SECS while the first pass runs, when the count moved (droidplay-core#307: hours with nothing to show)
     last = -1
     while not stop.wait(PROGRESS_SECS):
         n = count() if count else translated(tout)
-        if n != last: print(f'progress: {n}/{total}', flush=True); last = n
+        if n != last: print(f'progress: {n}/{total}{unit}', flush=True); last = n
 
 
 def step(name):   # 'step: <name>', which build_android_from_nsp.py shows as the step of the translation stage, its count starting again
@@ -265,15 +274,16 @@ def step(name):   # 'step: <name>', which build_android_from_nsp.py shows as the
 
 
 @contextlib.contextmanager
-def counting(total, count):
+def counting(total, count, unit=''):
     """'progress: <done>/<total>' at the start, from count() every PROGRESS_SECS while the block runs, and at its end: the steps after the first pass, which said nothing,
     so a build showed 100 % for the rest of the stage (droidplay-core#437: Pokémon Legends: Z-A's 28,603 shaders sat at 100 % with only the clock moving)"""
-    print(f'progress: 0/{total}', flush=True)
-    stop = threading.Event(); watch = threading.Thread(target=progress, args=(None, total, stop, count), daemon=True); watch.start()
+    u = f' {unit}' if unit else ''
+    print(f'progress: 0/{total}{u}', flush=True)
+    stop = threading.Event(); watch = threading.Thread(target=progress, args=(None, total, stop, count, u), daemon=True); watch.start()
     try: yield
     finally:
         stop.set(); watch.join()
-    print(f'progress: {count()}/{total}', flush=True)
+    print(f'progress: {count()}/{total}{u}', flush=True)
 
 
 def written(out, keys, since):   # the shaders whose res.json the post-pass has written in out since it started (res.json is written last; an older run's is older)
@@ -282,6 +292,55 @@ def written(out, keys, since):   # the shaders whose res.json the post-pass has 
         try: n += os.stat(out / f'{k}.res.json').st_mtime >= since
         except OSError: pass
     return n
+
+
+def free_ram():   # bytes of physical memory free now, None where it can't be read
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            class MS(ctypes.Structure): _fields_ = [('len', ctypes.c_ulong), ('load', ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ('tot', 'avail', 'totpf', 'availpf', 'totv', 'availv', 'ext')]
+            m = MS(); m.len = ctypes.sizeof(MS)
+            return m.avail if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)) else None
+        try:   # Linux: what can be had without swapping, the page cache included
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemAvailable:'): return int(line.split()[1]) << 10
+        except OSError: pass
+        return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+    except (OSError, ValueError, AttributeError): return None
+
+MEM_PER_JOB = int(os.environ.get('DM_SPV_MEM_MB') or 700) << 20   # a translator process's peak on a large shader set's job list, with margin; DM_SPV_MEM_MB changes it
+MEM_KEEP = 2 << 30   # left to the system and the post-pass
+
+def ram_jobs(j):
+    """-j limited by the memory free now (a 16 GB laptop runs as many translators as fit, not one per core and then pages): one MEM_PER_JOB each, MEM_KEEP left"""
+    free = free_ram()
+    if free is None or os.environ.get('DM_SPV_JOBS'): return j   # an explicit DM_SPV_JOBS / -j via it is taken as given
+    fit = max(1, (free - MEM_KEEP) // MEM_PER_JOB)
+    if fit < j: print(f'spv_build: {j} processes asked, {fit} fit in the {free / 2**30:.1f} GB of memory free ({MEM_PER_JOB >> 20} MB each): {fit}', flush=True)
+    return int(min(j, fit))
+
+
+STAMP = '.stamp'   # beside the output folder (<out>.stamp, not in it: the folder is copied to the game as it is): what the last complete run was made from (stamp_of) and what it left there
+
+def stamp_of(pkgs, a):
+    """The inputs a run depends on: the package files (names, sizes, modification times), the facts, the translator file, the chains of the post-pass and of the
+    mesh shaders' compute form. A run with the same stamp and its outputs still there has nothing to do (a rebuild of the host skips minutes of reading 4 GB)"""
+    h = hashlib.sha256()
+    for f in pkgs:
+        st = f.stat(); h.update(f'{f.name}\t{st.st_size}\t{st.st_mtime_ns}\n'.encode())
+    for extra in (a.facts, a.xlate):
+        if extra and os.path.exists(extra): st = os.stat(extra); h.update(f'{os.path.basename(extra)}\t{st.st_size}\t{st.st_mtime_ns}\n'.encode())
+    h.update(f'chain {sa.ANDROID_CHAIN} meshemu {meshemu_v()}\n'.encode())
+    return h.hexdigest()
+
+def stamp_reuse(out, stamp):   # → the last run's summary line when its stamp matches and its outputs are all still there, else None
+    try: d = json.loads(out.with_name(out.name + STAMP).read_text(encoding='utf-8'))
+    except (OSError, ValueError): return None
+    if d.get('stamp') != stamp or os.environ.get('DM_SPV_FORCE') == '1': return None
+    try: n = sum(1 for e in os.scandir(out) if e.name.endswith('.res.json'))
+    except OSError: return None
+    return d if n >= d.get('made', 1 << 62) else None
 
 
 def main():
@@ -294,64 +353,142 @@ def main():
 
 def translate(w):
     ap = argparse.ArgumentParser(description='translate a shader_split package for the Android Vulkan replay')
-    ap.add_argument('package'); ap.add_argument('out'); ap.add_argument('--xlate', required=True); ap.add_argument('--facts'); ap.add_argument('-j', type=int, default=os.cpu_count() or 4)
+    ap.add_argument('package'); ap.add_argument('out'); ap.add_argument('--xlate', required=True); ap.add_argument('--facts'); ap.add_argument('-j', type=int, default=int(os.environ.get('DM_SPV_JOBS') or 0) or os.cpu_count() or 4)
+    ap.add_argument('--batch', type=int, default=int(os.environ.get('DM_SPV_BATCH') or 0), help='shaders per batch (default: 250 per process, at least 2,000)')
     a = ap.parse_args()
+    a.j = ram_jobs(max(1, a.j)); a.batch = a.batch if a.batch > 0 else max(2000, 250 * a.j)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    pkgs = [f for f in sorted(Path(a.package).glob('*.bin')) if f.name[:2] in ('vs', 'ps', 'gs', 'tc', 'te', 'cs', 'ts', 'ms')]
+    stamp = stamp_of(pkgs, a)
+    if (d := stamp_reuse(out, stamp)):   # nothing changed since the last complete run: its summary, nothing read or translated (DM_SPV_FORCE=1 reads everything again)
+        print(f"spv_build: 0 translated, {d['made']} already there (0 given their constant buffer extents), {d['failed']} failed, {d['skipped']} skipped, inputs unchanged since the last run")
+        return
+    try: out.with_name(out.name + STAMP).unlink()   # a run that stops leaves no stamp: the next one reads the package again
+    except OSError: pass
     facts = {}
     if a.facts and os.path.exists(a.facts):
         for ln in open(a.facts, encoding='utf-8'):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = json.loads(v)
-    jobs, skipped, have, tfs, upg, nbytes, reused = {}, {}, 0, {}, 0, 0, 0
-    for f in sorted(Path(a.package).glob('*.bin')):
-        stage = f.name[:2]
-        if stage not in ('vs', 'ps', 'gs', 'tc', 'te', 'cs', 'ts', 'ms'): continue
-        for rec in records(f.read_bytes()):
-            code, ctl = split(rec)
-            if ctl[:4] != CTL_MAGIC: skipped[f'{f.name}?'] = 'no control section magic'; continue
-            key = key_of(ctl, code)
-            if key in jobs: continue
-            rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
-            prev = (out / f'{key}.spv').exists() and rp.exists()
-            if prev:
-                try: rj = json.loads(rp.read_text(encoding='utf-8'))
-                except ValueError: rj = {}   # empty or cut short, by a disk that filled while it was written: translated again
-                ch = rj.get('android')
-                if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
-                # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
-                # again, alone: the other shaders keep their chain
-                if ch == sa.ANDROID_CHAIN and not (stage in ('ts', 'ms') and (rj.get('mesh_emu', {}) or {'v': 0}).get('v') != meshemu_v()): have += 1; continue
-            j, why = job(key, stage, code, ctl, w, facts)
-            if not j: skipped[key] = why; continue
-            jobs[key] = j; nbytes += len(rec)
-            if prev: reused += sum(f.stat().st_size for f in (out / f'{key}.spv', out / f'{key}.z.spv', rp) if f.exists())   # an older chain's files, which this run overwrites
-            if stage == 'vs' and not dmsh_ampere.is_nvn2(ctl) and (tf := tf_layout(key, ctl)): tfs[key] = tf
-    room(out, Path(w), len(jobs), nbytes, reused)
-    keys = sorted(jobs); chunks = [keys[i::a.j] for i in range(a.j)]
+    jobs, skipped, have, tfs, upg, nbytes, reused, where = {}, {}, 0, {}, 0, 0, 0, {}
+    total_b, seen_b = sum(f.stat().st_size for f in pkgs), [0]   # the first look at the package counted in MB (a game's 4.4 GB of records took minutes with nothing shown)
+    big = total_b >= READ_COUNT_MIN   # a small package reads in a moment: no step of its own
+    if big: step('reading the shader package')
+    with counting(max(1, total_b >> 20), lambda: seen_b[0] >> 20, 'MB') if big else contextlib.nullcontext():
+        for f in pkgs:
+            stage = f.name[:2]; data = f.read_bytes()
+            for x, y in spans(data):
+                rec = data[x:y]; code, ctl = split(rec)
+                if ctl[:4] != CTL_MAGIC: skipped[f'{f.name}?'] = 'no control section magic'; continue
+                key = key_of(ctl, code)
+                if key in jobs: continue
+                rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
+                prev = (out / f'{key}.spv').exists() and rp.exists()
+                if prev:
+                    try: rj = json.loads(rp.read_text(encoding='utf-8'))
+                    except ValueError: rj = {}   # empty or cut short, by a disk that filled while it was written: translated again
+                    ch = rj.get('android')
+                    if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
+                    # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
+                    # again, alone: the other shaders keep their chain
+                    if ch == sa.ANDROID_CHAIN and not (stage in ('ts', 'ms') and (rj.get('mesh_emu', {}) or {'v': 0}).get('v') != meshemu_v()): have += 1; continue
+                j, why = job(key, stage, code, ctl, None, facts)
+                if not j: skipped[key] = why; continue
+                jobs[key] = j; nbytes += len(rec); where[key] = (f, x, y, stage)
+                if prev: reused += sum(f.stat().st_size for f in (out / f'{key}.spv', out / f'{key}.z.spv', rp) if f.exists())   # an older chain's files, which this run overwrites
+                if stage == 'vs' and not dmsh_ampere.is_nvn2(ctl) and (tf := tf_layout(key, ctl)): tfs[key] = tf
+            seen_b[0] += len(data); del data
+    room(out, Path(w), len(jobs), nbytes, reused, a.batch)
+    keys = sorted(jobs)
     xl = [a.xlate] if not a.xlate.endswith('.dll') else ['dotnet', a.xlate]
+    batches = [keys[i:i + a.batch] for i in range(0, len(keys), a.batch)]
+    many = len(batches) > 1   # one batch: the steps and counts as before; several: one count for the whole run, each batch's steps in the log only
+    failed, said, other, made_all, t0, base = {}, set(), [], 0, time.time(), [0]
+    if many: print(f'spv_build: {len(keys):,} shaders in {len(batches)} batches of up to {a.batch:,}, {a.j} translator processes', flush=True); step('translating')
+    # the shaders left to translate in this run (those an earlier run made are not counted), so a build that carries on after a stopped one starts from 0 of what is left
+    if jobs: print(f'progress: 0/{len(jobs)}', flush=True)
+    # Several batches: batch N's post-pass (spv_android.py, pure Python) runs in the background while batch N+1 translates, so the translator processes never wait
+    # for it; at most one post-pass at a time, and a run that stops waits for the one running, whose batch then stays made
+    pending, res = None, {}
+    def post_bg(n, done, tout, bw):
+        try: res[n] = post_batch(a, done, tout, out, failed, many, max(1, a.j // 2) if many else a.j)
+        except BaseException as e: res[n] = e
+        finally: shutil.rmtree(bw, ignore_errors=True)   # the batch's code areas and translator output: its results are in out now
+    def settle():
+        nonlocal pending, made_all
+        if pending is None: return
+        n, th = pending; th.join(); pending = None
+        r = res.pop(n)
+        if isinstance(r, BaseException): raise r
+        made_all += r
+    try:
+        for bi_, bkeys in enumerate(batches):
+            bw = Path(w) / f'b{bi_}'; bw.mkdir()
+            done, tout = translate_batch(a, bkeys, jobs, where, facts, tfs, out, bw, xl, failed, said, other, many, base, len(jobs))
+            settle()   # the previous batch's post-pass, before this one's starts
+            if not many:
+                try: made_all += post_batch(a, done, tout, out, failed, many, a.j)
+                finally: shutil.rmtree(bw, ignore_errors=True)
+            else:
+                th = threading.Thread(target=post_bg, args=(bi_, done, tout, bw), daemon=True); th.start(); pending = (bi_, th)
+            base[0] += len(bkeys)
+            if many:
+                dt = time.time() - t0; rate = base[0] / dt if dt > 0 else 0; left = (len(keys) - base[0]) / rate if rate else 0
+                print(f'progress: {base[0]}/{len(jobs)}', flush=True)
+                print(f'spv_build: batch {bi_ + 1}/{len(batches)} translated: {base[0]:,}/{len(keys):,} shaders in {dt / 60:.1f} min ({rate:.1f}/s), about {left / 60:.0f} min left', flush=True)
+        settle()
+    finally:
+        if pending is not None: pending[1].join()   # stopped: the batch already translated is still written into out
+    for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
+    print(f'spv_build: {made_all} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
+    if keys and not made_all: none_made(keys, said, have, other, a.xlate)
+    out.with_name(out.name + STAMP).write_text(json.dumps({'stamp': stamp, 'made': made_all + have, 'failed': len(failed), 'skipped': len(skipped)}), encoding='utf-8')
+
+
+def write_code_areas(keys, jobs, where, facts, bw, j):
+    """The batch's code areas into bw (job writes each), in package order, by j threads: the files are written while the next records are read"""
+    by_file = {}
+    for k in keys: by_file.setdefault(where[k][0], []).append(k)
+    with cf.ThreadPoolExecutor(max(1, min(j, 16))) as ex:
+        futs = []
+        for f, ks in by_file.items():
+            with open(f, 'rb') as fh:
+                for k in sorted(ks, key=lambda k: where[k][1]):
+                    _, x, y, stage = where[k]; fh.seek(x); rec = fh.read(y - x); code, ctl = split(rec)
+                    futs.append(ex.submit(job, k, stage, code, ctl, bw, facts))
+        for k, fu in zip([k for f, ks in by_file.items() for k in sorted(ks, key=lambda k: where[k][1])], futs):
+            jj, why = fu.result()
+            if jj: jobs[k]['code'] = jj['code']   # (the same job as the first look made: the same bytes)
+
+
+def translate_batch(a, keys, jobs, where, facts, tfs, out, w, xl, failed, said, other, many, base, total):
+    """One batch: its code areas, the translator (a.j processes, a share of the batch each), the integer-input pass. → (the shaders translated, the folder they are in)"""
+    write_code_areas(keys, jobs, where, facts, w, a.j)
+    chunks = [keys[i::a.j] for i in range(a.j)]
     tout = Path(w) / 'out'; tout.mkdir()
     def run(ch):
         jp = Path(w) / f'job_{abs(hash(ch[0]))}.json'; jp.write_text(json.dumps([jobs[k] for k in ch]), encoding='utf-8')
         return subprocess.run(xl + [str(jp), str(tout)], capture_output=True, text=True, errors='replace')
-    failed, said, other = {}, set(), []
-    # the shaders left to translate in this run (those an earlier run made are not counted), so a build that carries on after a stopped one starts from 0 of what is left
-    if jobs: print(f'progress: 0/{len(jobs)}', flush=True)
-    stop = threading.Event(); watch = threading.Thread(target=progress, args=(tout, len(jobs), stop), daemon=True)
-    if jobs: watch.start()
+    bfailed = {}
+    stop = threading.Event()
+    watch = threading.Thread(target=progress, args=(tout, total, stop, (lambda: base[0] + translated(tout)) if many else None), daemon=True)
+    if keys: watch.start()
     try:
         with cf.ThreadPoolExecutor(a.j) as ex:
-            for r in ex.map(run, [c for c in chunks if c]): take(r, failed, said, other)
+            for r in ex.map(run, [c for c in chunks if c]): take(r, bfailed, said, other)
     finally:
         stop.set()
         if watch.is_alive(): watch.join()
-    if jobs: print(f'progress: {translated(tout)}/{len(jobs)}', flush=True)
-    stop_if_full(failed, tout, 'first pass')
-    again = int_input_jobs(keys, jobs, tout, a.j)
+    if keys and not many: print(f'progress: {translated(tout)}/{total}', flush=True)
+    stop_if_full(bfailed, tout, 'first pass')
+    quiet = contextlib.redirect_stdout(io.StringIO()) if many else contextlib.nullcontext()   # several batches: no step lines per batch (they would restart the build's count)
+    with quiet: again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
-        step('translating vertex shaders again'); cs, redone = [c for c in [again[i::a.j] for i in range(a.j)] if c], [0]
-        with cf.ThreadPoolExecutor(a.j) as ex, counting(len(again), lambda: redone[0]):
-            for c, r in zip(cs, ex.map(run, cs)): take(r, failed, said, other, 'integer-input retranslation: ', 130); redone[0] += len(c)
+        if not many: step('translating vertex shaders again')
+        cs, redone = [c for c in [again[i::a.j] for i in range(a.j)] if c], [0]
+        with cf.ThreadPoolExecutor(a.j) as ex, (counting(len(again), lambda: redone[0]) if not many else contextlib.nullcontext()):
+            for c, r in zip(cs, ex.map(run, cs)): take(r, bfailed, said, other, 'integer-input retranslation: ', 130); redone[0] += len(c)
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
-        stop_if_full(failed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
+        stop_if_full(bfailed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
     for k in done:   # the feedback layout and a task / mesh shader's facts go with the shader's reflection: spv_android.py makes the capture variant and the stage modules from them
         if k in tfs or 'mesh_stage' in jobs[k]:
@@ -362,19 +499,24 @@ def translate(w):
             if 'mesh_stage' in jobs[k]: r['mesh'] = {'info': jobs[k]['mesh_stage'], 'lay': jobs[k]['stage_memory']}
             rp.write_text(json.dumps(r), encoding='utf-8')
     for k in keys:
-        if k not in done and k not in failed: failed[k] = 'no output from the translator'
-    for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
-    for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')   # before the post-pass, so a post-pass that stops doesn't lose them (#307's log had none of them)
+        if k not in done and k not in bfailed: bfailed[k] = 'no output from the translator'
+    for k, why in sorted(bfailed.items()): print(f'[RED] {k}: {why}')   # before the post-pass, so a post-pass that stops doesn't lose them (#307's log had none of them)
+    failed.update(bfailed)
     sys.stdout.flush()   # the post-pass writes to the same log
+    return done, tout
+
+
+def post_batch(a, done, tout, out, failed, many, j):
+    """The post-pass of one batch (spv_android.py, j processes) into out. → the shaders made. With several batches it runs while the next batch translates"""
     if done:
-        step('final pass'); since = time.time() - 2   # exFAT keeps modification times to 2 s
-        with counting(len(done), lambda: written(out, done, since)):
-            subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
+        if not many: step('final pass')
+        since = time.time() - 2   # exFAT keeps modification times to 2 s
+        with counting(len(done), lambda: written(out, done, since)) if not many else contextlib.nullcontext():
+            subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(j), str(tout), str(out)], check=True)   # every key in tout (this batch's): no list on the command line, which Windows limits to 32 K characters
     lost = [k for k in done if not (out / f'{k}.res.json').exists()]   # outputs the post-pass couldn't read (its [RED] lines): res.json, written last, makes a shader translated
     for k in lost: failed.setdefault(k, "the post-pass couldn't read its output")
-    made = len(done) - len(lost)
-    print(f'spv_build: {made} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
-    if keys and not made: none_made(keys, said, have, other, a.xlate)
+    return len(done) - len(lost)
+
 
 if __name__ == '__main__':
     main()

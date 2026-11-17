@@ -65,7 +65,8 @@ class Harness(unittest.TestCase):
                 return r
             jp, tout = Path(cmd[-2]), Path(cmd[-1]); self.touts.append(tout)
             return self.process(cmd, json.loads(jp.read_text(encoding='utf-8')), tout)
-        for p in (mock.patch.object(sb.subprocess, 'run', side_effect=run), mock.patch.object(tempfile, 'tempdir', str(self.sysdir))):   # the system's temp folder, watched too
+        for p in (mock.patch.object(sb.subprocess, 'run', side_effect=run), mock.patch.object(tempfile, 'tempdir', str(self.sysdir)),   # the system's temp folder, watched too
+                  mock.patch.object(sb, 'free_ram', return_value=None)):   # -j as given, whatever this machine has free
             p.start(); self.addCleanup(p.stop)
 
     def process(self, cmd, jobs, tout):   # one dmsh_xlate process over its job list: → what it printed, and its exit code
@@ -104,7 +105,7 @@ class TemporaryFolder(Harness):
         text = self.build()
         self.assertIn(f'spv_build: {self.N} translated', text)
         self.assertIn(f'spv_android: {self.N} shaders', self.lines); self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
-        self.assertTrue(self.touts and all(t.parent.parent == self.work for t in self.touts), self.touts)   # WORK/spv_*/out, on the game's drive
+        self.assertTrue(self.touts and all(t.parent.parent.parent == self.work for t in self.touts), self.touts)   # WORK/spv_*/b<batch>/out, on the game's drive
         self.assertEqual(self.left(), [])
 
     def test_a_failed_post_pass_leaves_nothing(self):   # the post-pass subprocess stops (check=True): spv_build stops before its old rmtree
@@ -116,7 +117,7 @@ class TemporaryFolder(Harness):
     def test_a_full_disk_while_the_code_areas_are_written_leaves_nothing(self):
         real, n = Path.write_bytes, [0]
         def write(p, data):   # the third code area finds the disk full
-            if p.parent.name.startswith('spv_') and p.suffix == '.bin':
+            if any(q.name.startswith('spv_') for q in p.parents) and p.suffix == '.bin':   # (under the run's folder: its batch's)
                 n[0] += 1
                 if n[0] == 3: raise OSError(errno.ENOSPC, 'No space left on device', str(p))
             return real(p, data)
@@ -134,7 +135,7 @@ class TemporaryFolder(Harness):
 
     def test_without_work_the_system_temp_folder(self):   # spv_build.py run by hand
         self.build(env={})
-        self.assertTrue(self.touts and all(t.parent.parent == self.sysdir for t in self.touts), self.touts)
+        self.assertTrue(self.touts and all(t.parent.parent.parent == self.sysdir for t in self.touts), self.touts)
         self.assertEqual(list(self.sysdir.iterdir()), [])
         self.assertFalse(self.work.exists())
 
@@ -404,6 +405,89 @@ class Progress(Harness):   # 'progress: <done>/<total>', which build_android_fro
         with mock.patch.object(sb, 'PROGRESS_SECS', 0.01), contextlib.redirect_stdout(buf):
             t = threading.Thread(target=sb.progress, args=(d, 4, stop)); t.start(); time.sleep(0.2); stop.set(); t.join()
         self.assertEqual(self.counts(buf.getvalue()), ['progress: 1/4'])
+
+
+class Batches(Harness):   # --batch: the shaders a batch at a time, each batch's results in out before the next starts, so a stopped run keeps the finished batches
+    N = 7
+
+    def build_b(self, batch, env=None):
+        with mock.patch.dict(os.environ, {'DM_SPV_BATCH': str(batch)}): return self.build(env)
+
+    def test_every_shader_is_made_over_several_batches(self):
+        text = self.build_b(3)
+        self.assertIn(f'spv_build: {self.N} translated', text); self.assertIn('in 3 batches of up to 3', text)
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N); self.assertEqual(self.left(), [])
+        self.assertEqual(len({t.parent.name for t in self.touts}), 3)   # a folder per batch: b0, b1, b2
+        c = [ln for ln in text.splitlines() if ln.startswith('progress: ')]
+        self.assertEqual((c[0], c[-1]), (f'progress: 0/{self.N}', f'progress: {self.N}/{self.N}'))   # one count for the whole run
+        self.assertNotIn('step: final pass', text)   # no per-batch steps: they would restart the build's count
+        self.assertIn('batch 3/3 translated', text)
+
+    def test_a_run_stopped_in_its_second_batch_keeps_the_first(self):
+        calls = [0]; real = self.process
+        def process(cmd, jobs, tout):
+            calls[0] += 1
+            if calls[0] == 3: raise KeyboardInterrupt   # the player closes the window in batch 2 (batch 1 had two translator processes)
+            return real(cmd, jobs, tout)
+        with mock.patch.object(self, 'process', process), self.assertRaises(KeyboardInterrupt): self.build_b(3)
+        kept = sorted(p.name[:-9] for p in self.out.glob('*.res.json'))
+        self.assertEqual(kept, self.keys()[:3]); self.assertEqual(self.left(), [])   # batch 1's shaders, and no temporary folder
+        text = self.build_b(3)   # the next build translates only what is left
+        self.assertIn(f'spv_build: {self.N - 3} translated, 3 already there', text)
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
+
+    def test_the_code_areas_are_those_of_the_jobs(self):   # written as their batch starts, by several threads: each job's file holds its own shader's code
+        seen = {}
+        def process(cmd, jobs, tout):
+            for j in jobs: seen[j['key']] = Path(j['code']).read_bytes()
+            return Harness.process(self, cmd, jobs, tout)
+        with mock.patch.object(self, 'process', process): self.build_b(2)
+        want = {sb.key_of(*reversed(sb.split(record(i)))): sb.split(record(i))[0][0x30:] for i in range(self.N)}
+        self.assertEqual(seen, want)
+
+    def test_the_temporary_room_is_one_batch(self):
+        with mock.patch.object(sb.shutil, 'disk_usage', return_value=SimpleNamespace(free=10 ** 12)):
+            sb.room(self.out if self.out.exists() else self.tmp, self.tmp, 100, 10 ** 9, 0, 10)   # 100 shaders, batches of 10: fits
+        with mock.patch.object(sb.shutil, 'disk_usage', return_value=SimpleNamespace(free=int(15.5e9))), mock.patch.object(sb, "same_drive", return_value=True):
+            sb.room(self.tmp, self.tmp, 100, 10 ** 9, 0, 10)   # 12 GB for the output, 0.8 GB for one batch's temporary copy and the 2.1 GB spare; not 8 GB of temporary copy for all of it
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()): sb.room(self.tmp, self.tmp, 100, 10 ** 9, 0)
+
+
+class Stamp(Harness):   # <out>.stamp: a run whose inputs are those of the last complete one, with its outputs there, reads nothing (a host-only rebuild skips minutes of reading 4 GB)
+    def test_an_unchanged_rerun_reads_nothing(self):
+        self.build(); n = len(self.touts)
+        with mock.patch.object(sb, 'split', side_effect=AssertionError('read the package')): text = self.build()
+        self.assertIn(f'spv_build: 0 translated, {self.N} already there', text); self.assertIn('inputs unchanged', text); self.assertEqual(len(self.touts), n)
+
+    def test_a_changed_package_is_read_again(self):
+        self.build(); f = self.pkg / 'ps_0.bin'; st = f.stat(); os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        text = self.build(); self.assertNotIn('inputs unchanged', text); self.assertIn(f'spv_build: 0 translated, {self.N} already there', text)
+
+    def test_missing_outputs_are_made_again(self):
+        self.build(); (self.out / f'{self.keys()[0]}.res.json').unlink()
+        self.assertIn('spv_build: 1 translated', self.build())
+
+    def test_force_reads_again(self):
+        self.build(); self.assertNotIn('inputs unchanged', self.build({'WORK': str(self.work), 'DM_SPV_FORCE': '1'}))
+
+    def test_a_stopped_run_leaves_no_stamp(self):
+        self.build(); f = self.pkg / 'ps_0.bin'; st = f.stat(); os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        with mock.patch.object(sb, 'split', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt): self.build()
+        self.assertFalse(self.out.with_name(self.out.name + sb.STAMP).exists())
+
+
+class RamJobs(unittest.TestCase):   # -j limited to the translators the free memory holds (a 16 GB Surface)
+    def test_limits(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('DM_SPV_JOBS', None)
+            with mock.patch.object(sb, 'free_ram', return_value=sb.MEM_KEEP + 3 * sb.MEM_PER_JOB + 1), contextlib.redirect_stdout(io.StringIO()): self.assertEqual(sb.ram_jobs(12), 3)
+            with mock.patch.object(sb, 'free_ram', return_value=1 << 20), contextlib.redirect_stdout(io.StringIO()): self.assertEqual(sb.ram_jobs(12), 1)
+            with mock.patch.object(sb, 'free_ram', return_value=None): self.assertEqual(sb.ram_jobs(12), 12)
+            with mock.patch.object(sb, 'free_ram', return_value=1 << 50): self.assertEqual(sb.ram_jobs(12), 12)
+        with mock.patch.dict(os.environ, {'DM_SPV_JOBS': '12'}), mock.patch.object(sb, 'free_ram', return_value=1 << 20): self.assertEqual(sb.ram_jobs(12), 12)   # asked for: as given
+
+    def test_free_ram_reads(self):
+        self.assertTrue(sb.free_ram() is None or sb.free_ram() > 0)
 
 
 if __name__ == '__main__':

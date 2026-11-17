@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Pack a Switch game you own for Windows on Arm (arm64: Snapdragon X, 8cx): your NSP / XCI files and prod.keys, a NUP, or a dump folder in; a folder you can start the game from out.
 #   python scripts/build_windows_from_nsp.py <NSP folder | .nup | dump folder> [-k <prod.keys>] [-p <version>] [-l <language>] [--out <folder>] [--romfs copy|link|path]
+#   python scripts/build_windows_from_nsp.py --only host|stage [--out <folder> | <NSP folder>]   after a full build: the host (and the game folder) again, nothing before it
 #   python scripts/build_windows_from_nsp.py --host-only --title <title ID> [--out <folder>]    the host alone (dmhost.exe for that game's profile) and the self test, no game files
 # The steps up to the shaders are build_android_from_nsp.py's (identify the game → extract → rewrite → split and translate the shaders to SPIR-V), with the rewrite for Windows
 # (dm/tools/patch_nso.py with DM_TARGET=windows: the thread slots through x18, which is the TEB there) into <id>_build/patched_windows_<version>/. Then, in place of the Android
@@ -16,7 +17,7 @@
 # Runs on the Surface itself (Windows 11 arm64: Python, the .NET SDK 10, CMake, Ninja, llvm-mingw's aarch64 release, glslang or the Vulkan SDK's glslc), or on Linux / macOS / x64 Windows
 # with llvm-mingw's release for that system (then copy the folder over). See docs/WINDOWS_ARM.md.
 # Nothing here downloads game files, keys or firmware: they are yours, read where you give them.
-import argparse, json, os, re, shutil, subprocess, sys
+import argparse, json, os, re, shutil, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -60,16 +61,37 @@ def link_or_copy(src, dst):
     return dst
 
 
-def put_tree(src, dst, link=True):   # src's files into dst (made afresh), hard-linked where the drive allows (the shaders: tens of thousands of files, gigabytes)
-    if dst.exists(): shutil.rmtree(dst)
-    shutil.copytree(src, dst, copy_function=link_or_copy if link else shutil.copy2)
+def same(a, b):   # b is a's hard link, or a copy with its size and modification time (copy2 keeps it)
+    return a.st_ino == b.st_ino and a.st_dev == b.st_dev and a.st_ino or (a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns)
+
+def put_tree(src, dst, link=True):
+    """dst made the same as src: its files hard-linked where the drive allows (the shaders: >100k files, gigabytes), else copied; a file already there unchanged is kept,
+    one src no longer has removed. A rebuild after a host change stages the game in seconds, not by deleting and linking every shader again. → files written"""
+    if dst.is_symlink() or dst.is_file(): dst.unlink()
+    dst.mkdir(parents=True, exist_ok=True)
+    put = 0; have = {e.name: e for e in os.scandir(dst)}
+    for e in os.scandir(src):
+        d = have.pop(e.name, None); t = dst / e.name
+        if e.is_dir():
+            if d is not None and not d.is_dir(follow_symlinks=False): os.unlink(t)
+            put += put_tree(Path(e.path), t, link)
+            continue
+        if d is not None:
+            if d.is_dir(follow_symlinks=False): shutil.rmtree(t)
+            elif same(e.stat(), d.stat(follow_symlinks=False)): continue
+            else: os.unlink(t)
+        (link_or_copy if link else shutil.copy2)(e.path, t); put += 1
+    for d in have.values():
+        if d.is_dir(follow_symlinks=False): shutil.rmtree(d.path)
+        else: os.unlink(d.path)
+    return put
 
 
 class Windows:
     def __init__(self, a):
         self.a = a; self.lm = llvm_mingw(a.llvm_mingw)
 
-    def host(self, gid, work, logs, env):   # → (dmhost.exe, dmhost_cli.exe) for game profile gid
+    def host(self, gid, work, logs, env):   # → (dmhost.exe, dmhost_cli.exe) for game profile gid; Ninja rebuilds only what changed (DM_TUNE / DM_CPU: dm/windows/CMakeLists.txt)
         cmake = tool(['cmake'], self.a.cmake, 'install CMake 3.22 or newer (pip install cmake)')
         ninja = tool(['ninja'], self.a.ninja, 'install Ninja (pip install ninja)')
         bdir = work / 'windows_host'
@@ -80,8 +102,10 @@ class Windows:
         cfg = [cmake, '-G', 'Ninja', '-S', REPO / 'dm/windows', '-B', bdir, f'-DCMAKE_MAKE_PROGRAM={ninja}', f'-DLLVM_MINGW={self.lm}',
                f'-DCMAKE_TOOLCHAIN_FILE={REPO / "dm/windows/cmake/aarch64-w64-mingw32.cmake"}', f'-DGAME={gid}', f'-DPython3_EXECUTABLE={sys.executable}']
         if self.a.glslang: cfg.append(f'-DGLSLANG={self.a.glslang}')
+        for k in ('DM_TUNE', 'DM_CPU'):   # the compiler's tuning (default oryon-1, Snapdragon X) and an optional -mcpu, from the environment
+            if os.environ.get(k) is not None: cfg.append(f'-D{k}={os.environ[k]}')
         bi.run(cfg, logs / 'windows_cmake.log', env=env)
-        bi.run([ninja, '-C', bdir, 'dmhost_app', 'dmhost_cli'], logs / 'windows_host.log', env=env)
+        bi.run([ninja, '-C', bdir] + (['-j', str(self.a.jobs)] if self.a.jobs else []) + ['dmhost_app', 'dmhost_cli'], logs / 'windows_host.log', env=env)
         return bdir / 'dmhost.exe', bdir / 'dmhost_cli.exe'
 
     def selftest(self, work, logs, env):   # the synthetic module, rewritten for Windows → its folder
@@ -99,6 +123,10 @@ class Windows:
 
     def finish(self, g, game, patched, spv, font, aoc, defaults, work, logs, env, meta, runtime):
         out = Path(self.a.out).expanduser().resolve() if self.a.out else work.parent / f'{g.id}_windows'
+        state = dict(id=g.id, dir=str(g.dir), game=str(game), patched=str(patched), spv=str(spv) if spv else None, font=str(font), aoc=str(aoc), defaults=defaults, work=str(work),
+                     env={k: v for k, v in env.items() if os.environ.get(k) != v}, meta=meta, runtime=bool(runtime))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / STATE).write_text(json.dumps(state, indent=1), encoding='utf-8')   # for --only host / stage: the next rebuild skips the steps before them
         bi.PROG.stage('Windows host'); exes = self.host(g.id, work, logs, env); st = self.selftest(work, logs, env); bi.PROG.end(str(exes[0]))
         bi.PROG.stage('game folder')
         self.stage_host(out, exes, st)
@@ -129,6 +157,29 @@ class Windows:
         if runtime: say('the game compiles shaders while it runs: its captures land in game/glslc_capture; build again to translate them')
 
 
+STATE = 'build_state.json'   # in the output folder: what the last full build staged from (Windows.finish), for --only
+
+
+def only(w, a):
+    """--only host: the host and the self test built again (Ninja: the changed sources only) and put in the folder, the game left as it is.
+    --only stage: that, and the game folder staged again from the last build's outputs. Neither unpacks, rewrites or reads the shaders"""
+    cands = [Path(a.out).expanduser().resolve()] if a.out else []
+    if a.nsp_dir:
+        src = Path(a.nsp_dir).expanduser().resolve()
+        for b in (src, src.parent):
+            cands += sorted(b.glob(f'{a.title_id.upper() if a.title_id else "*"}_windows'))
+    st = next((c / STATE for c in cands if (c / STATE).is_file()), None)
+    if st is None: raise BuildError(f'--only {a.only}: no {STATE} from a full build in {", ".join(map(str, cands)) or "(give --out <the game folder> or the NSP folder / .nup)"}: run a full build once')
+    s = json.loads(st.read_text(encoding='utf-8')); out = st.parent; work = Path(s['work']); logs = work / 'logs'; logs.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, **s['env'])
+    if a.only == 'host':
+        bi.PROG.stage('Windows host'); exes = w.host(s['id'], work, logs, env); stt = w.selftest(work, logs, env); bi.PROG.end(str(exes[0]))
+        w.stage_host(out, exes, stt); say(f'done: {out} (host rebuilt; game/ unchanged)'); return
+    w.a.out = str(out)
+    g = type('G', (), dict(id=s['id'], dir=Path(s['dir'])))()
+    w.finish(g, Path(s['game']), Path(s['patched']), Path(s['spv']) if s['spv'] else None, Path(s['font']), Path(s['aoc']), s['defaults'], work, logs, env, s['meta'], s['runtime'])
+
+
 def readme(meta, out):
     return f'''{meta.get("name", "")} ({meta.get("title_id", "")}) {meta.get("version", "")} for Windows on Arm (arm64), packed by nxnative's scripts/build_windows_from_nsp.py.
 Start: dmhost.exe (a window; F11 or Alt+Enter: full screen). dmhost.exe --console: with a console showing the log. dmhost_cli.exe <folder> main: no window.
@@ -152,8 +203,14 @@ def main(argv):
     ap.add_argument('--host-only', action='store_true', help='build the host and the self test only (no game files), with --title')
     ap.add_argument('--title', help='with --host-only: the game profile (dm/games/<title ID>)')
     ap.add_argument('--allow-damaged', action='store_true', help="as build_android_from_nsp.py's")
+    ap.add_argument('-j', '--jobs', type=int, help='shader translator processes and Ninja jobs (default: one per core, fewer when the free memory holds fewer translators)')
+    ap.add_argument('--skip-shaders', action='store_true', help='reuse the shaders a build translated before (<id>_build/spv) without checking them against the package')
+    ap.add_argument('--only', choices=('host', 'stage'), help='host: rebuild dmhost.exe and put it in the folder of the last full build; stage: that and the game folder again')
     a = ap.parse_args(argv)
+    if a.jobs: os.environ['DM_SPV_JOBS'] = str(a.jobs)
+    if a.skip_shaders: os.environ['DM_SKIP_SPV'] = '1'
     w = Windows(a)
+    if a.only: return only(w, a)
     if a.host_only:
         if not a.title or not re.fullmatch(r'[0-9A-Fa-f]{16}', a.title): raise BuildError('--host-only needs --title <16-digit title ID with a profile in dm/games>')
         gid = a.title.upper(); base = ba.data_dir().parent / 'windows' / gid   # %LOCALAPPDATA%\nxnative\windows\<id> on Windows (beside the Android library)

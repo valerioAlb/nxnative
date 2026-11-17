@@ -5,7 +5,7 @@
 #   woa_spike.exe    the platform checks (tests/woa_spike.c): thread slots through x18, fixed-address memory, faults caught and resumed, thread suspension
 # Configure with llvm-mingw (cmake/aarch64-w64-mingw32.cmake) from any host, or natively on the device with llvm-mingw's arm64 release:
 #   cmake -G Ninja -S dm/windows -B <build> -DCMAKE_TOOLCHAIN_FILE=dm/windows/cmake/aarch64-w64-mingw32.cmake -DLLVM_MINGW=<llvm-mingw> -DGAME=<base game title ID>
-#         [-DGLSLANG=<glslang or glslangValidator>] [-DDM_GAMES_DIR=<profiles folder outside dm/games>] [-DDM_GFX=vk|null] [-DDM_TESTS=ON]
+#         [-DGLSLANG=<glslang or glslangValidator>] [-DDM_TUNE=oryon-1] [-DDM_CPU=<cpu>] [-DDM_GAMES_DIR=<profiles folder outside dm/games>] [-DDM_GFX=vk|null] [-DDM_TESTS=ON]
 cmake_minimum_required(VERSION 3.22)
 project(dmhost_windows C CXX ASM RC)
 
@@ -13,6 +13,15 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
   message(FATAL_ERROR "dm/windows builds for Windows on Arm (arm64) only; the toolchain targets ${CMAKE_SYSTEM_PROCESSOR}: use cmake/aarch64-w64-mingw32.cmake")
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# Code generation for the CPU: DM_TUNE schedules for it (-mtune, no instruction the armv8.2-a baseline lacks: the .exe runs on any Windows on Arm PC; default oryon-1,
+# Snapdragon X's cores); DM_CPU (-mcpu, empty by default) also uses its newer instructions: oryon-1 for a host that runs only on Snapdragon X
+set(DM_TUNE "oryon-1" CACHE STRING "-mtune for the host (empty: the compiler's default)")
+set(DM_CPU "" CACHE STRING "-mcpu for the host (empty: none, the armv8.2-a+lse baseline)")
+if(DM_CPU)
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=${DM_CPU}>)
+elseif(DM_TUNE)
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mtune=${DM_TUNE}>)
+endif()
 set(DM ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(AND ${DM}/android)
 set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
