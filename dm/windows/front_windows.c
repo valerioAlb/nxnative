@@ -761,6 +761,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (!logged) LOG("[RED] cannot write %s: is the folder read-only? (the log goes to the console only)", lp);
     LOG("nxnative on Windows on Arm: %s (%s), program folder %s, game %s, data %s", DM_GAME_NAME, DM_GAME_ID, g_dir, game_arg ? game_arg : g_game, g_data);
     env_file(g_dir, "env.txt", 1); env_file(game_arg ? game_arg : g_game, "launcher.txt", 0); env_file(game_arg ? game_arg : g_game, "defaults.txt", 0);
+    // a game's defaults built into the host, for a game folder made before its profile's windows_defaults.txt had them (env.txt or defaults.txt still win).
+    // Pokémon Pokopia: its 3D scene is composed into a 1920x1080 RGBA8 sRGB image through an image store, which the Adreno X1-45 cannot store to in sRGB: skipped, the
+    // world drew black under the UI. DM_VK_STORAGE_UP=2 stores it through its UNORM twin (the texels as written, as Maxwell's stores)
+    static const struct { const char *game, *key, *val; } k_game_env[] = {{"0400A3A01EE4C000", "DM_VK_STORAGE_UP", "2"}};
+    for (size_t i = 0; i < sizeof k_game_env / sizeof k_game_env[0]; i++)
+        if (!strcmp(DM_GAME_ID, k_game_env[i].game) && !getenv(k_game_env[i].key)) { setenv(k_game_env[i].key, k_game_env[i].val, 1); LOG("game default: %s=%s", k_game_env[i].key, k_game_env[i].val); }
     settings_env();
     vk_driver_dirs(g_dir, g_data);
     vk_driver_game(game_arg ? game_arg : g_game, DM_GAME_ID);

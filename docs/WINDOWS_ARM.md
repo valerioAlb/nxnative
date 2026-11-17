@@ -283,6 +283,7 @@ To narrow such a hang down (env.txt):
 |---|---|
 | `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower |
 | `DM_SPV_LOOP_CAP=<n>` (menu: Shader loop limit) | every shader loop stops after n trips (default on the Adreno: 4096; `0` off). Applied as the shaders load: no new translation |
+| `DM_VK_STORAGE_UP=2` | an sRGB image a shader stores to is stored through its UNORM twin (the Adreno cannot store sRGB). On by default for Pokémon Pokopia, whose 3D world was black without it |
 | `DM_SPV_DEMOTE=1` | a fragment shader's discard (OpKill) becomes a demote to a helper invocation and a return: an A/B for a driver that mishandles OpKill |
 | `DM_VK_SKIP_SHADER=<hash>,<hash>` | draws of these shaders (the hang report names them) are left out: a way to keep playing past one that hangs |
 | `DM_VK_MID_DRAWS=8` | GPU submissions of 8 draws, so the hang report names the draw closely (slower) |

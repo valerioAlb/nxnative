@@ -554,7 +554,9 @@ static size_t spv_fit_loopcap(const uint32_t *code, size_t nw, const char *what,
     if (ns) { atomic_fetch_add(&g_lc_skip, ns); static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[vk] %s: %u loop(s) shaped otherwise, not capped (spv_loopcap)", what, ns); }
     if (!k) { free(o); return 0; }
     atomic_fetch_add(&g_lc_loops, nc);
-    if (atomic_fetch_add(&g_lc_mods, 1) == 0) LOG("[vk] shader loops capped at %u trips (spv_loopcap). First: %s, %u loop(s)", cap, what, nc);
+    uint64_t nm = atomic_fetch_add(&g_lc_mods, 1);
+    if (!nm) LOG("[vk] shader loops capped at %u trips (spv_loopcap). First: %s, %u loop(s)", cap, what, nc);
+    else if (nm < 64) { const char *b = strrchr(what, '/'); LOG("[vk] shader loops capped: %s, %u loop(s)", b ? b + 1 : what, nc); }   // which shaders: to match a hang report's
     *out = o; return k;
 }
 // The vertex shader with its outputs started as (0,0,0,1) (spv_vsinit.h), in *out (to free); 0 when it is no vertex shader or has no output to start.
