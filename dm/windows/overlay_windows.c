@@ -252,13 +252,13 @@ static int page_rows(void) { return g_page ? C_ROWS : M_ROWS; }
 static void menu_geom(float *u, float *x0, float *y0, float *w, float *rh) {
     float s = (float)(g_bw < g_bh ? g_bw : g_bh); *u = s / 30; *rh = *u * (g_page ? 1.12f : 1.4f);
     *w = *u * (g_page ? 34 : 30); if (*w > (float)g_bw * 0.96f) *w = (float)g_bw * 0.96f;
-    float h = *rh * (page_rows() + 2.2f); *x0 = ((float)g_bw - *w) / 2; *y0 = ((float)g_bh - h) / 2; if (*y0 < 0) *y0 = 0;
+    float h = *rh * (page_rows() + 2.7f); *x0 = ((float)g_bw - *w) / 2; *y0 = ((float)g_bh - h) / 2; if (*y0 < 0) *y0 = 0;
 }
 static int menu_row_at(float px, float py, int *side) {
     float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh); int n = page_rows();
     if (px < x0 || px > x0 + w) return -2;
     int r = (int)floorf((py - (y0 + rh * 1.6f)) / rh);
-    if (py < y0 || r >= n) return py < y0 || py > y0 + rh * (n + 2.2f) ? -2 : -1;
+    if (py < y0 || r >= n) return py < y0 || py > y0 + rh * (n + 2.7f) ? -2 : -1;
     if (r < 0) return -1;
     *side = px < x0 + w * 0.62f ? 0 : px < x0 + w * 0.77f ? -1 : 1; return r;
 }
@@ -293,12 +293,12 @@ static void controls_draw(float u, float x0, float y0, float w, float rh) {
     char nb[160];
     if (g_cap >= 0 && g_cap < RM_NBTN) { snprintf(nb, sizeof nb, "Press a key or controller button for %s   (Esc: keep it, Delete: none)", rm_act_label[g_cap]); note = nb; }
     else if (g_cap >= 0) { static const char *const dn[4] = {"up", "down", "left", "right"}; snprintf(nb, sizeof nb, "Press the key for %s %s   (Esc: stop, Delete: none)", g_cap == C_STICK_L ? "left stick" : "right stick", dn[g_cap_step]); note = nb; }
-    text_at(note, (int)(x0 + u), (int)(y0 + rh * (C_ROWS + 1.75f)), (int)(u * 0.55f), g_cap >= 0 ? 1.0f : 0.65f, 1);
+    text_at(note, (int)(x0 + u), (int)(y0 + rh * (C_ROWS + 2.05f)), (int)(u * 0.55f), g_cap >= 0 ? 1.0f : 0.65f, 1);
 }
 static void menu_draw(void) {
     float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh);
     tp_rect(g_px, g_bw, g_bh, 0, 0, (float)g_bw, (float)g_bh, 0, 0x000000, 0.45f);
-    tp_rect(g_px, g_bw, g_bh, x0, y0, x0 + w, y0 + rh * (page_rows() + 2.2f), u * 0.8f, 0x14181E, 0.94f);
+    tp_rect(g_px, g_bw, g_bh, x0, y0, x0 + w, y0 + rh * (page_rows() + 2.7f), u * 0.8f, 0x14181E, 0.94f);
     if (g_page == 1) { controls_draw(u, x0, y0, w, rh); return; }
     text_at("Settings", (int)(x0 + u), (int)(y0 + rh * 0.8f), (int)(u * 1.05f), 1, 1);
     text_at("F2 / Esc / B closes", (int)(x0 + w - u * 9), (int)(y0 + rh * 0.8f), (int)(u * 0.55f), 0.55f, 1);
@@ -316,7 +316,7 @@ static void menu_draw(void) {
             text_at(g_restart_due ? "Restart the game now to apply *" : "* applies at the next start", (int)(x0 + u), (int)cy, (int)(u * 0.68f), g_restart_due ? 1.0f : 0.5f, 1);
         } else text_at("Close", (int)(x0 + u), (int)cy, (int)(u * 0.68f), 0.95f, 1);
     }
-    if (g_sel < NM && k_menu[g_sel].note) text_at(k_menu[g_sel].note, (int)(x0 + u), (int)(y0 + rh * (M_ROWS + 1.75f)), (int)(u * 0.55f), 0.65f, 1);
+    if (g_sel < NM && k_menu[g_sel].note) text_at(k_menu[g_sel].note, (int)(x0 + u), (int)(y0 + rh * (M_ROWS + 2.05f)), (int)(u * 0.55f), 0.65f, 1);
 }
 static void draw(void) {
     buffers(g_w, g_h); if (!g_px) return;

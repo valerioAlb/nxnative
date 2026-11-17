@@ -239,7 +239,7 @@ static void paint(HDC dc, int w, int h) {
         else { fill(dc, &ic, RGB(0x2A, 0x30, 0x3A), S(14)); char ini[3] = {g->name[0], 0}; text(dc, ini, &ic, 64, FW_BOLD, RGB(0x8F, 0xA0, 0xB5), DT_CENTER | DT_VCENTER | DT_SINGLELINE); }
         RECT nr = {r.left, r.top + t + S(6), r.right, r.top + t + S(44)}; text(dc, g->name, &nr, 16, FW_SEMIBOLD, RGB(0xF0, 0xF0, 0xF0), DT_CENTER | DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
         char sub[96]; snprintf(sub, sizeof sub, "%s%s%s", g->id, g->ver[0] ? "  \xC2\xB7  " : "", g->ver);
-        RECT sr = {r.left, r.top + t + S(46), r.right, r.top + t + S(68)}; text(dc, sub, &sr, 12, FW_NORMAL, RGB(0x9A, 0xA4, 0xB0), DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT sr = {r.left, r.top + t + S(46), r.right, r.top + t + S(68)}; text(dc, sub, &sr, 12, FW_NORMAL, i == g_sel ? RGB(0xDD, 0xE8, 0xF4) : RGB(0x9A, 0xA4, 0xB0), DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     if (!g_n) {
         RECT m = {S(40), top + S(60), w - S(40), top + S(220)};

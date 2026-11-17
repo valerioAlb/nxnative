@@ -6,7 +6,7 @@
 name: windows-arm
 on:
   push:
-    branches: [windows-arm]
+    branches: [windows-arm, main]
     paths: ['dm/**', 'scripts/**', '.github/workflows/windows-arm.yml']
   pull_request:
     paths: ['dm/windows/**', '.github/workflows/windows-arm.yml']
