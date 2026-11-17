@@ -131,6 +131,42 @@ Then it builds `dmhost.exe` for the profile and writes:
 - **First boot** shows the language list: `A`, `Up`, `A` (keyboard: `Z`, arrow up, `Z`). Then follow the Mac notes in the profile README.
 - **Files.** The log is `log.txt` beside `dmhost.exe`. Saves, temp and pipeline cache are in `%LOCALAPPDATA%\nxnative\<title ID>`. Dumps from the `dump_now` switch go to `<out>\dump`.
 
+### Rebuilding fast
+
+A second build reuses everything that did not change: the extraction, the rewrite (`patched_windows_<version>/`), the shader split, every shader already
+translated (by its hash, in `<id>_build\spv`) and the host's objects (Ninja). A failed test on the Surface does not cost the two hours of shaders again.
+
+| Command | What runs |
+|---|---|
+| `build_windows_from_nsp.py <same input> --out <same folder>` | everything, but only what changed: shaders by hash; with the shader package unchanged, its 4 GB are not even read (`<id>_build\spv.stamp`; `DM_SPV_FORCE=1` reads them again) |
+| `... --skip-shaders` | as above, the translated shaders taken as they are |
+| `... --only host` (with `--out <folder>` or the input) | only `dmhost.exe` / `dmhost_cli.exe` rebuilt (changed sources only, about a second for one file) and copied into the folder of the last full build (`build_state.json` there); the game is left alone |
+| `... --only stage` | the host, and the game folder synced again (changed files only) from the last build's outputs |
+| `-j N` / `--jobs N` | shader translator processes and Ninja jobs (default: one per core) |
+
+Shader translation:
+
+- It runs in batches of `max(2000, 250 × jobs)` shaders (`DM_SPV_BATCH`), one .NET process per core.
+- Each finished batch goes into `spv\` at once, so a stopped run keeps it, and the post-pass of one batch overlaps the translation of the next.
+- The log has a line per batch with the rate and the minutes left. Reading a large shader package shows a progress count in MB.
+- Temporary space covers one batch, not the whole game.
+- Without `--jobs`, the number of processes is capped by free memory (700 MB each, `DM_SPV_MEM_MB`, keeping 2 GB free). A 16 GB Surface therefore does not page.
+
+Faster disks and no scanning:
+
+- **Internal NVMe, not USB.** Put the input's `<id>_build` folder and `--out` on the internal SSD. The split and the translation write and read over 100,000 small files.
+- **Windows Defender exclusion.** Real-time scanning of each of those files is the largest slowdown on Windows. Exclude the build folder and the output folder. As administrator:
+  `Add-MpPreference -ExclusionPath "D:\nxnative", "D:\dumps\pokopia\0400A3A01EE4C000_build"` (Settings › Privacy & security › Windows Security ›
+  Virus & threat protection › Exclusions does the same). Alternatively, use a Dev Drive (Settings › System › Storage › Disks & volumes › Create Dev Drive), which defaults to
+  asynchronous scanning.
+- **Native arm64 tools on the Surface.**
+  - Python for Windows arm64 (python.org's "ARM64" installer).
+  - The .NET SDK 10 for Arm64: `dotnet --info` should say `RID: win-arm64`. An x64 dotnet runs the translator under emulation, several times slower.
+  - llvm-mingw's `ucrt-aarch64` release, CMake and Ninja (`pip install cmake ninja` on arm64 Python).
+  - glslang has no arm64 Windows release. The x64 one runs emulated and is used only for the host's few built-in shaders.
+- **CPU tuning.** The host is compiled with `-mtune=oryon-1` (Snapdragon X). It uses only the armv8.2-a instructions every Windows on Arm PC has.
+  `DM_CPU=oryon-1` (environment) also enables Snapdragon X's newer instructions; such a build then runs only there. `DM_TUNE=` (empty) keeps the compiler's default.
+
 Controls:
 
 | Control | Input |
