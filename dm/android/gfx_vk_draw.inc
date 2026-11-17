@@ -518,6 +518,21 @@ static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uin
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
     *out = o; return k;
 }
+// The module with its uniform buffer reads at computed indices bounded to the declared array, 0 past it (spv_cbbound.h), in *out (to free); 0 when it has none.
+// On every GPU: Maxwell's constant buffers read 0 past their size, Vulkan without robustness reads wherever the index points, and Pokémon Pokopia's world
+// shader 85c01ed67ec089e9 hung the Adreno X1-45 on such a read. DM_SPV_CB_BOUND=0 (env.txt): modules as translated
+static _Atomic uint64_t g_cbb_mods, g_cbb_reads;
+static size_t spv_fit_cbbound(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_CB_BOUND"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_CB_BOUND=0: uniform buffer reads at computed indices are not bounded"); }
+    *out = NULL; if (!on || nw < 5) return 0;
+    uint32_t *s = malloc(3 * 4 * (size_t)code[3]), *o = NULL; size_t need = 0, k = 0; unsigned nc = 0, nl = 0;
+    if (s) { spv_cbbound(code, nw, s, NULL, 0, &need, &nc, &nl); if (need && (o = malloc(need * 4))) k = spv_cbbound(code, nw, s, o, need, &need, &nc, &nl); }
+    free(s);
+    if (!k) { free(o); return 0; }
+    atomic_fetch_add(&g_cbb_reads, nc);
+    if (!atomic_fetch_add(&g_cbb_mods, 1)) LOG("[vk] uniform buffer reads at computed indices give 0 past the declared array, as Maxwell's constant buffers (spv_cbbound; DM_SPV_CB_BOUND=0 off). First: %s, %u read(s)", what, nc);
+    *out = o; return k;
+}
 // The fragment shader with its discards made demotes and a return (spv_demote.h), in *out (to free); 0 when it has none or DM_SPV_DEMOTE=1 is not on (g_demote)
 static size_t spv_fit_demote(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     *out = NULL; if (!g_demote || !spv_demote_wanted(code, nw)) return 0;

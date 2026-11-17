@@ -42,6 +42,7 @@
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_noptr.h"   // raw global memory through a descriptor array, for drivers that refuse OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
+#include "spv_cbbound.h"   // uniform buffer reads at a computed index give 0 past the declared array, as Maxwell's (gfx_vk_draw.inc spv_fit_cbbound)
 #include "spv_demote.h"   // DM_SPV_DEMOTE=1: a fragment shader's OpKill made a demote and a return (gfx_vk_draw.inc spv_fit_demote)
 #include "spv_loopcap.h"   // every loop of a translated shader ended after a cap of trips, so one that never ends cannot hold the GPU until the driver resets it (gfx_vk_draw.inc spv_fit_loopcap)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
