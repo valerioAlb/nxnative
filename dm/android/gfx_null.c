@@ -173,6 +173,7 @@ uint64_t mtl_pkg_miss(void) { return 0; }
 uint64_t mtl_upload_ns_take(void) { return 0; }
 uint64_t mtl_upload_gpu_ns_take(void) { return 0; }
 void mtl_create_stats(uint64_t *a, uint64_t *b) { *a = *b = 0; }
+double mtl_gpu_wait_s(void) { return 0; }
 void mtl_create_ns(uint64_t *a, uint64_t *b) { *a = *b = 0; }
 void mtl_hybrid_stats(uint64_t *a, uint64_t *b, uint64_t *c) { *a = *b = *c = 0; }
 uint64_t mtl_upload_bytes(void) { return 0; }

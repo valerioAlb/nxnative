@@ -704,6 +704,9 @@ static uint64_t g_flushes;
 // chunks were cut after every draw (a file vk_mid holding 1, mid_poll). At most 3 such chunks are logged, and the first lost fence or submission says what VK_EXT_device_fault gives
 enum { GPU_SLOW_NS = 200000000 };   // a chunk this long on the GPU (64 draws by default, 512 with DM_VK_MID_DRAWS=512) is a hang or as good as one
 void (*vk_lost_hook)(int result);
+static _Atomic uint64_t g_gpu_wait_t0;   // when vk-done began waiting for the oldest chunk in flight, 0 while it waits for none
+// seconds the GPU has been on the oldest submission in flight (0: none waited for): the Windows front end's note says the GPU, not shaders, is what it waits for
+double mtl_gpu_wait_s(void) { uint64_t t = atomic_load(&g_gpu_wait_t0); if (!t) return 0; uint64_t n = clock_gettime_nsec_np(CLOCK_MONOTONIC); return n > t ? (n - t) / 1e9 : 0; }
 static _Atomic int g_hang_cut;   // a submission was cut short by the driver's hang recovery (gpu_slow): the next refused submission means the GPU is gone
 static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees the loss first
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
@@ -768,7 +771,7 @@ static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     static int nrep; if (nrep >= 3) return;
     nrep++; bc_report("a slow submission", c->seq); int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
     LOG("[RED] [vk] submission %llu took %.0f ms on the GPU%s%s (the one before had completed): it recorded %d passes, draws and dispatches, the last %d of them:", (unsigned long long)c->seq, ns / 1e6,
-        cut ? ", its end timestamp never written (the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : fr != VK_SUCCESS ? ", never on the queue (it refused the submission)" : "", c->ncr, n);
+        cut == 2 ? ", neither its start nor its end timestamp written (it never started on the GPU: it waited behind other work, or the driver's hang recovery dropped it)" : cut ? ", its start timestamp written but not its end (it hung in its own commands; the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : fr != VK_SUCCESS ? ", never on the queue (it refused the submission)" : "", c->ncr, n);
     for (int k = 0; k < n;) {   // a run of the same crumb (Breath of the Wild's chunks hold runs of 17 alike draws) is one line, "× run"
         int i = (c->ncr - n + k) % CR_MAX, run = 1; char kd = c->cr[i].kind; int at = c->ncr - n + k;
         while (k + run < n) { int j = (c->ncr - n + k + run) % CR_MAX;
@@ -1172,13 +1175,16 @@ static void *chunk_thread(void *arg) {
     for (;;) {
         pthread_mutex_lock(&g_cmu); while (!g_fifo_n) pthread_cond_wait(&g_ccv, &g_cmu); chunk *c = g_fifo[0]; pthread_mutex_unlock(&g_cmu);
         rec_wait_submitted(c->rq_ticket);   // a deferred submission reached the queue first (gfx_vk_rec.inc); before w0, so the recorder's lag is not taken for GPU time
-        uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); atomic_store(&g_gpu_wait_t0, w0);   // (mtl_gpu_wait_s: the front end's note while the GPU is stuck)
         VkResult fr = c->sub_r != VK_SUCCESS ? c->sub_r : vkWaitForFences(g_vk.dev, 1, &c->fence, VK_TRUE, UINT64_MAX);   // a fence never on the queue never signals
-        uint64_t waited = clock_gettime_nsec_np(CLOCK_MONOTONIC) - w0; int cut = 0;   // the chunk's time on the GPU (the one before had completed), at most (gpu_slow)
+        uint64_t waited = clock_gettime_nsec_np(CLOCK_MONOTONIC) - w0; int cut = 0; atomic_store(&g_gpu_wait_t0, 0);   // the chunk's time on the GPU (the one before had completed), at most (gpu_slow)
         int ts = c->ts, nq = c->nq, ntq = c->ntq, npq = c->npq;   // the queries it used, reset once read (qr_done): the counts are zeroed on the way
         c->t_end = 0; uint64_t busy = 0;
         if (c->ts) { uint64_t t[2]; c->ts = 0;
             VkResult tr = vkGetQueryPoolResults(g_vk.dev, g_tsq, 2 * (uint32_t)(c - g_ch), 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT); cut = tr == VK_NOT_READY && fr == VK_SUCCESS;
+            if (cut) {   // did it start at all? Its start timestamp unwritten: it never ran, it waited behind something (not its own draws)
+                uint64_t sa[2] = {0, 0}; vkGetQueryPoolResults(g_vk.dev, g_tsq, 2 * (uint32_t)(c - g_ch), 1, sizeof sa, sa, sizeof sa, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+                cut = sa[1] ? 1 : 2; }
             if (tr == VK_SUCCESS && t[1] > t[0])
                 { atomic_fetch_add(&g_gpu_ns, (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod)); atomic_fetch_add(&g_gpu_chunks, 1); c->t_end = t[1];
                   uint64_t s = t[1] > last && t[0] < last ? last : t[0];   // from the previous chunk's end when it started before it; an end at or before that one (the counter started again) counts the whole span

@@ -290,7 +290,10 @@ To narrow such a hang down (env.txt):
 | `DM_OVERLAY_WINDOW=0` | no window over the game at all: no touch controls, F2 menu, FPS or notes |
 | `DM_TOUCH_OVERLAY=off` | the touch controls hidden (F1 brings them back); the menu still works |
 
-The hang report lists the submission's passes, draws, dispatches and (now) its copies, uploads, blits and clears.
+The hang report lists the submission's passes, draws, dispatches and (now) its copies, uploads, blits and clears. It also says whether the
+submission ever started on the GPU (its start timestamp written): one that never started waited behind other work, so its own
+draws are not the cause. While the GPU is stuck on a submission for 2 s or more, the note over the game says `Waiting for the GPU`
+instead of `Still working` (whose shader and pipeline numbers are totals since the start, not work in progress).
 
 The touch controls, menu and notes are a separate GDI window composed by Windows. They never submit Vulkan work.
 

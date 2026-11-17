@@ -44,7 +44,8 @@ static _Atomic int g_state = ST_START;
 static _Atomic uint64_t g_frames;
 static char g_dir[600], g_game[700], g_data[700], g_last[200], g_phase[80] = "Starting";
 static uint64_t g_t0;   // the program's start (dm_win_mono_ns)
-void mtl_create_stats(uint64_t *modules, uint64_t *pipelines);   // gfx_vk.c: shader modules and pipelines made so far
+void mtl_create_stats(uint64_t *modules, uint64_t *pipelines);
+double mtl_gpu_wait_s(void);   // gfx_vk.c: seconds the GPU has been on its oldest submission in flight (0: none)   // gfx_vk.c: shader modules and pipelines made so far
 static pthread_mutex_t g_txt_mu = PTHREAD_MUTEX_INITIALIZER;
 static HWND g_wnd;
 static _Atomic int g_closing;
@@ -592,8 +593,10 @@ static void stall_note(void) {
     if (g_shown != seen_n) { seen_n = g_shown; seen_at = now; ovl_badge(NULL); return; }
     double idle = (double)(now - seen_at) / 1e9;
     if (idle < st_num("stall_note", 3) || GetForegroundWindow() != g_wnd || st_num("stall_note", 3) <= 0) { ovl_badge(NULL); return; }
-    uint64_t mods = 0, pipes = 0; mtl_create_stats(&mods, &pipes); char t[160];
-    snprintf(t, sizeof t, "Still working (%.0f s)  \u00b7  shaders %llu, pipelines %llu", idle, (unsigned long long)mods, (unsigned long long)pipes);
+    uint64_t mods = 0, pipes = 0; mtl_create_stats(&mods, &pipes); char t[160]; double gw = mtl_gpu_wait_s();
+    // the shader / pipeline counts are totals since the start: with the GPU on one submission for seconds (a hang Windows may yet reset), the note says so instead
+    if (gw >= 2) snprintf(t, sizeof t, "Waiting for the GPU (%.0f s): it has not finished its work", gw);
+    else snprintf(t, sizeof t, "Still working (%.0f s)  \u00b7  shaders %llu, pipelines %llu made so far", idle, (unsigned long long)mods, (unsigned long long)pipes);
     ovl_badge(t);
 }
 
