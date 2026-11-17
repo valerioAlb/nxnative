@@ -9,7 +9,7 @@
 #   1. the game's host for Windows on Arm (dm/windows, CMake + llvm-mingw): dmhost.exe (with a window) and dmhost_cli.exe (none), in <id>_build/windows_host/
 #   2. the self test (dm/android/tests/selftest_nso.py, rewritten with DM_TARGET=windows), which dmhost.exe runs when it finds no game
 #   3. the folder (--out, default <NSP folder>/<id>_windows):
-#        dmhost.exe  dmhost_cli.exe  env.txt (yours: KEY=VALUE lines, kept when there)  selftest/  README.txt
+#        dmhost.exe  dmhost_cli.exe  nxlauncher.exe (every built game's cover: start one with a tap)  env.txt (yours: KEY=VALUE lines, kept when there)  selftest/  README.txt
 #        game/  code/ (the rewritten modules)  RomFS.img or RomFS/  spv/ (the shaders)  font/  aoc/ (DLC)  defaults.txt  game.json  icon.jpg  control.nacp
 #      --romfs link (default): the RomFS image hard-linked from the extraction when it is on the same drive, else copied; copy: always copied; path: not copied, defaults.txt's
 #      DM_ROMFS names the extraction's image (keep the build folder then)
@@ -91,7 +91,7 @@ class Windows:
     def __init__(self, a):
         self.a = a; self.lm = llvm_mingw(a.llvm_mingw)
 
-    def host(self, gid, work, logs, env):   # → (dmhost.exe, dmhost_cli.exe) for game profile gid; Ninja rebuilds only what changed (DM_TUNE / DM_CPU: dm/windows/CMakeLists.txt)
+    def host(self, gid, work, logs, env):   # → (dmhost.exe, dmhost_cli.exe, nxlauncher.exe: the games' covers) for game profile gid; Ninja rebuilds only what changed (DM_TUNE / DM_CPU: dm/windows/CMakeLists.txt)
         cmake = tool(['cmake'], self.a.cmake, 'install CMake 3.22 or newer (pip install cmake)')
         ninja = tool(['ninja'], self.a.ninja, 'install Ninja (pip install ninja)')
         bdir = work / 'windows_host'
@@ -105,8 +105,8 @@ class Windows:
         for k in ('DM_TUNE', 'DM_CPU'):   # the compiler's tuning (default oryon-1, Snapdragon X) and an optional -mcpu, from the environment
             if os.environ.get(k) is not None: cfg.append(f'-D{k}={os.environ[k]}')
         bi.run(cfg, logs / 'windows_cmake.log', env=env)
-        bi.run([ninja, '-C', bdir] + (['-j', str(self.a.jobs)] if self.a.jobs else []) + ['dmhost_app', 'dmhost_cli'], logs / 'windows_host.log', env=env)
-        return bdir / 'dmhost.exe', bdir / 'dmhost_cli.exe'
+        bi.run([ninja, '-C', bdir] + (['-j', str(self.a.jobs)] if self.a.jobs else []) + ['dmhost_app', 'dmhost_cli', 'nxlauncher'], logs / 'windows_host.log', env=env)
+        return bdir / 'dmhost.exe', bdir / 'dmhost_cli.exe', bdir / 'nxlauncher.exe'
 
     def selftest(self, work, logs, env):   # the synthetic module, rewritten for Windows → its folder
         d = work / 'windows_selftest'; d.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def only(w, a):
 
 def readme(meta, out):
     return f'''{meta.get("name", "")} ({meta.get("title_id", "")}) {meta.get("version", "")} for Windows on Arm (arm64), packed by nxnative's scripts/build_windows_from_nsp.py.
-Start: dmhost.exe (a window; F11 or Alt+Enter: full screen). dmhost.exe --console: with a console showing the log. dmhost_cli.exe <folder> main: no window.
+Start: dmhost.exe (a window; F11 or Alt+Enter: full screen), or nxlauncher.exe: the covers of every game built in this folder's folder (a tap starts one). dmhost.exe --console: with a console showing the log. dmhost_cli.exe <folder> main: no window.
 Keyboard: WASD left stick, IJKL right stick, arrows D-pad, Z/X/C/V = A/B/X/Y, E/U = L/R, Q/O = ZL/ZR, F/H = stick clicks, Enter = +, Backspace = -. XInput pads 1-4; the mouse touches.
 Settings: env.txt (KEY=VALUE lines, a key there wins over game/defaults.txt). Log: log.txt beside dmhost.exe. Saves and caches: %LOCALAPPDATA%\\nxnative\\{meta.get("title_id", "<title ID>")}.
 No game files are in this folder unless you put them there: keep it to yourself.

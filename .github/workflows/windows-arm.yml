@@ -39,11 +39,11 @@ jobs:
         run: |
           cmake -G Ninja -S dm/windows -B build/spike -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DDM_SPIKE_ONLY=ON
           ninja -C build/spike
-      - name: Host (dmhost.exe, dmhost_cli.exe) for ${{ env.GAME }}
+      - name: Host (dmhost.exe, dmhost_cli.exe) and nxlauncher.exe for ${{ env.GAME }}
         run: |
           cmake -G Ninja -S dm/windows -B build/host -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DGAME=$GAME
-          ninja -C build/host -k 0 dmhost_app dmhost_cli 2>&1 | tee build/host.log
-          test -f build/host/dmhost.exe && test -f build/host/dmhost_cli.exe
+          ninja -C build/host -k 0 dmhost_app dmhost_cli nxlauncher 2>&1 | tee build/host.log
+          test -f build/host/dmhost.exe && test -f build/host/dmhost_cli.exe && test -f build/host/nxlauncher.exe
       - name: Touch controls and button mapping (dm/windows/touchpad.c, remap.c) on the build machine
         run: |
           cc -O1 -Wall -Werror -I dm/host -I dm/windows dm/windows/tests/t_touchpad.c dm/windows/touchpad.c -lm -o build/t_touchpad && build/t_touchpad
@@ -60,6 +60,7 @@ jobs:
             build/spike/woa_spike.exe
             build/host/dmhost.exe
             build/host/dmhost_cli.exe
+            build/host/nxlauncher.exe
             build/host.log
             build/selftest
           if-no-files-found: warn
@@ -132,6 +133,21 @@ jobs:
           & "$d/dmhost_cli.exe" 2>&1 | Tee-Object -FilePath cli_usage.log; $rc = $LASTEXITCODE
           if ($rc -ne 2) { throw ('usage exit {0:X8}, not 2' -f $rc) }
           exit 0
+      - name: nxlauncher.exe finds a built game folder, reads its game.json and icon, and draws its cover
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $root = "$env:RUNNER_TEMP/games"; $g = "$root/Test Game_windows"; New-Item -ItemType Directory -Force "$g/game" | Out-Null
+          Copy-Item bin/host/dmhost.exe $g
+          '{"title_id": "0100000000ABC000", "name": "Test Game è", "version": 65536, "display": "1.0.1"}' | Set-Content -Encoding utf8NoBOM "$g/game/game.json"
+          Add-Type -AssemblyName System.Drawing
+          $bmp = New-Object System.Drawing.Bitmap 256, 256; $gr = [System.Drawing.Graphics]::FromImage($bmp); $gr.Clear([System.Drawing.Color]::FromArgb(255, 200, 60, 40))
+          $gr.FillEllipse([System.Drawing.Brushes]::Gold, 48, 48, 160, 160); $gr.Dispose(); $bmp.Save("$g/game/icon.jpg", [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose()
+          $p = Start-Process -FilePath bin/host/nxlauncher.exe -ArgumentList '--folder', "`"$root`"", '--list', 'launcher_list.txt', '--dump', 'launcher.bmp' -PassThru -Wait
+          Get-Content launcher_list.txt
+          if ($p.ExitCode -ne 0) { throw "nxlauncher.exe exited with $($p.ExitCode)" }
+          if (-not (Select-String -Path launcher_list.txt -Pattern '^game 0100000000ABC000 \| Test Game .* \| 1\.0\.1 \| .* \| icon 256x256' -Quiet)) { throw 'the test game was not found with its name, version and icon' }
+          if (-not (Test-Path launcher.bmp)) { throw 'no launcher.bmp' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -140,6 +156,7 @@ jobs:
             selftest.log
             cli_*.log
             ovl_*.bmp
+            launcher*
             gui_*.log
             gui_*.crash.txt
           if-no-files-found: ignore

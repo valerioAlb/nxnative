@@ -769,10 +769,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         xinput_poll();
         if (!frame_draw()) { static uint64_t last; uint64_t now = dm_win_mono_ns(); if (now - last > 33000000ull) { last = now; status_draw(); } }   // the loader, 30 times a second
         stall_note(); fps_note();
-        { static double at = -1; if (at < 0) { const char *e = getenv("DM_OPEN_MENU_AFTER"); at = e ? atof(e) : 0; }   // CI: the menu's picture
-          if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = -2; ovl_menu(1); }
-          else if (at == -2 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > atof(getenv("DM_OPEN_MENU_AFTER")) + 3) {   // then its Controls page, as the arrows and Enter go there
-              at = 0; for (int k = 0; k < 3; k++) ovl_menu_key(VK_UP); ovl_menu_key(VK_RETURN); } }
+        { static double at = -1; static int step; if (at < 0) { const char *e = getenv("DM_OPEN_MENU_AFTER"); at = e ? atof(e) : 0; }   // CI: the menu's pictures
+          double t = (double)(dm_win_mono_ns() - g_t0) / 1e9;
+          if (at > 0 && step == 0 && t > at) { step = 1; ovl_menu(1); }
+          else if (at > 0 && step == 1 && t > at + 3) { step = 2; for (int k = 0; k < 3; k++) ovl_menu_key(VK_UP); ovl_menu_key(VK_RETURN); } }   // then its Controls page, by the keys
         ovl_follow();
         vk_start_tick();
     }

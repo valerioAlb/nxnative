@@ -228,6 +228,18 @@ Until the first frame the window shows a loader: the game's name, a spinner, the
 pipeline cache...), the elapsed time and the number of shaders and pipelines compiled so far. When the picture stops changing
 for a few seconds later on (a level loading, shaders compiling), a small "Still working" note with a spinner appears at the top.
 
+### The launcher (nxlauncher.exe)
+
+`nxlauncher.exe` sits beside `dmhost.exe` in every built folder. It shows the covers of the built games: each game's own icon
+(`game\icon.jpg`, from its NACP control data), with its name, title ID and version. A tap, a click, Enter or the controller's A
+starts that game's `dmhost.exe`. The launcher then minimizes and comes back when the game ends. Drag or use the wheel to scroll.
+A right click or a long press opens the game's menu: start, its folder, its log.txt, its saves and settings.
+
+It looks in the folders of its list, in each folder itself and in the folders right inside it. The list starts with its own folder and
+the one above it, so `D:\nxnative_pokopia\nxlauncher.exe` finds every `D:\<name>` game folder. "+ Add folder" adds another one,
+and "Folders" removes one. The list and the last-played order are kept in `%LOCALAPPDATA%\nxnative\launcher.ini`.
+`nxlauncher.exe --folder <path>` adds a folder for that run only. Pin it to Start or the taskbar like any program.
+
 ### Controls: changing the keys and buttons, rumble
 
 F2 → **Controls** lists the Switch's buttons with their keyboard key and Xbox controller button. Choose a row (tap, click, or

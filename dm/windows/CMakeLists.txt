@@ -159,6 +159,13 @@ target_link_libraries(dmhost_app ${DM_LIBS})
 target_link_options(dmhost_app PRIVATE -municode -static -Wl,--stack,8388608)   # -static: winpthreads and the C++ runtime inside, only system DLLs needed
 set_target_properties(dmhost_app PROPERTIES OUTPUT_NAME dmhost)
 
+# nxlauncher.exe: the games' covers, to start one (launcher_windows.c); no game code in it
+add_executable(nxlauncher WIN32 ${CMAKE_CURRENT_SOURCE_DIR}/launcher_windows.c ${DM_RC})
+target_compile_options(nxlauncher PRIVATE -std=gnu11 -O2 -Wall -Wno-unused-function -Wno-misleading-indentation)
+target_compile_definitions(nxlauncher PRIVATE WIN32_LEAN_AND_MEAN=1 NOMINMAX=1 _WIN32_WINNT=0x0A00 UNICODE=1 _UNICODE=1)
+target_link_libraries(nxlauncher ole32 uuid shell32 user32 gdi32 xinput1_4)
+target_link_options(nxlauncher PRIVATE -municode -static)
+
 add_executable(dmhost_cli $<TARGET_OBJECTS:dmcore> ${AND}/front_cli.c ${AND}/nvn_demo.c ${DM_RC})
 target_include_directories(dmhost_cli PRIVATE $<TARGET_PROPERTY:dmcore,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_options(dmhost_cli PRIVATE $<$<COMPILE_LANGUAGE:C>:${DM_CFLAGS} -ffixed-x18>)
