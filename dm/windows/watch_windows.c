@@ -12,7 +12,8 @@ static HANDLE g_out = INVALID_HANDLE_VALUE;   // the log file (appending), else 
 static void out_raw(const char *s, int n) { DWORD w; HANDLE h = g_out != INVALID_HANDLE_VALUE ? g_out : GetStdHandle(STD_ERROR_HANDLE); if (h && h != INVALID_HANDLE_VALUE) WriteFile(h, s, (DWORD)n, &w, NULL); }
 static void outf(const char *fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b, fmt, ap); va_end(ap); if (n > (int)sizeof b - 1) n = sizeof b - 1; if (n > 0) out_raw(b, n); }
 
-enum { MAXT = 512, MAXM = 512, NFR = 6 };
+enum { MAXT = 512, MAXM = 512, NFR = 10 };
+#define PACM 0x00007fffffffffffull   // return addresses on the stack (and lr) carry a pointer-authentication code in the bits above 47
 typedef struct { DWORD tid; int ok; DWORD64 pc, lr, sp, fp, fr[NFR]; } tstate;
 typedef struct { uintptr_t lo, hi; char name[64]; } mstate;
 static tstate g_t[MAXT]; static mstate g_m[MAXM]; static int g_nt, g_nm;
@@ -45,7 +46,7 @@ void dm_win_dump_threads(const char *why) {
             HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, t->tid); if (!h) continue;
             if (SuspendThread(h) != (DWORD)-1) {   // held only for the context: nothing here takes a lock the thread may hold
                 CONTEXT c = {.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER};
-                if (GetThreadContext(h, &c)) { t->ok = 1; t->pc = c.Pc; t->lr = c.Lr; t->sp = c.Sp; t->fp = c.Fp; }
+                if (GetThreadContext(h, &c)) { t->ok = 1; t->pc = c.Pc; t->lr = c.Lr & PACM; t->sp = c.Sp; t->fp = c.Fp; }
                 ResumeThread(h);
             }
             CloseHandle(h);
@@ -54,7 +55,7 @@ void dm_win_dump_threads(const char *why) {
     }
     for (int i = 0; i < g_nt; i++) {   // frame records {fp, lr} from the stack, read safely (a thread runs on meanwhile)
         DWORD64 fp = g_t[i].fp;
-        for (int f = 0; f < NFR && fp && !(fp & 7); f++) { DWORD64 rec[2]; SIZE_T got = 0; if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)fp, rec, sizeof rec, &got) || got != sizeof rec) break; g_t[i].fr[f] = rec[1]; if (rec[0] <= fp) break; fp = rec[0]; }
+        for (int f = 0; f < NFR && fp && !(fp & 7); f++) { DWORD64 rec[2]; SIZE_T got = 0; if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)fp, rec, sizeof rec, &got) || got != sizeof rec) break; g_t[i].fr[f] = rec[1] & PACM; if (rec[0] <= fp) break; fp = rec[0]; }
     }
     outf("[watch] threads (%s): %d, this one %lu\n", why, g_nt, me);
     for (int i = 0; i < g_nt; i++) {
