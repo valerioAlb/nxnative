@@ -229,6 +229,18 @@ static void draw(void) {
         }
         text_at(g_badge, (int)(x0 + (float)u * 2.1f), (int)cy, (int)((float)u * 0.62f), 0.95f, 1);
     }
+    {   // DM_OVL_DUMP=<folder>: the first picture of the controls and of the menu as BMP files (CI looks at them: its desktop is covered by the set-up screen)
+        static int dumped[2]; const char *dd = getenv("DM_OVL_DUMP"); int k = g_menu ? 1 : 0;
+        if (dd && *dd && !dumped[k] && (g_menu || g_visible)) {
+            dumped[k] = 1; char fn[700]; snprintf(fn, sizeof fn, "%s/ovl_%s.bmp", dd, k ? "menu" : "controls"); FILE *f = fopen(fn, "wb");
+            if (f) {
+                uint32_t isz = (uint32_t)g_bw * (uint32_t)g_bh * 4u, hdr[13] = {0};
+                uint8_t fh[14] = {'B', 'M'}; uint32_t fsz = 14 + 40 + isz, off = 54; memcpy(fh + 2, &fsz, 4); memcpy(fh + 10, &off, 4);
+                hdr[0] = 40; hdr[1] = (uint32_t)g_bw; hdr[2] = (uint32_t)-g_bh; hdr[3] = 1u | 32u << 16; hdr[5] = isz;
+                fwrite(fh, 1, 14, f); fwrite(hdr, 1, 40, f); fwrite(g_px, 1, isz, f); fclose(f); LOG("touch controls: picture %s", fn);
+            }
+        }
+    }
     POINT dst = {g_x, g_y}, src = {0, 0}; SIZE sz = {g_bw, g_bh};
     BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     UpdateLayeredWindow(g_ov, NULL, &dst, &sz, g_dc, &src, 0, &bf, ULW_ALPHA);

@@ -664,6 +664,7 @@ static void full_screen(int on) {
     }
     g_sc_stale = 1;
 }
+static DWORD WINAPI pc_save_thread(void *u) { (void)u; vkb_pipeline_cache_save(); return 0; }   // off the window's thread: a big cache takes a moment
 static void close_game(void) {
     if (atomic_exchange(&g_closing, 1)) return;
     LOG("window closed: the game ends as on SIGTERM (its saves are kept)");
@@ -684,7 +685,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CLOSE: close_game(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_SIZE: g_sc_stale = 1;
-        if (game) { static int min; int now = w == SIZE_MINIMIZED; if (now != min) { min = now; dm_focus_set(now ? 3 : 1); dm_audio_suspend(now); } }
+        if (game) { static int min; int now = w == SIZE_MINIMIZED; if (now != min) { min = now; dm_focus_set(now ? 3 : 1); dm_audio_suspend(now);
+                  if (now) { HANDLE t = CreateThread(NULL, 0, pc_save_thread, NULL, 0, NULL); if (t) CloseHandle(t); } } }   // minimized: the pipelines kept now, as Android does on a pause
         return 0;
     case WM_ACTIVATEAPP:
         if (!w) { g_key_btn = 0; memset(g_key_ax, 0, sizeof g_key_ax); key_axis_set('W', 0); key_axis_set('A', 0); key_axis_set('S', 0); key_axis_set('D', 0);

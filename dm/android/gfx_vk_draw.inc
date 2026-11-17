@@ -73,7 +73,18 @@ static VkPipelineCache pcache(void) {
     if (env && drv) snprintf(g_pc_path, sizeof g_pc_path, "%s%s.%s", env, fz, drv); else if (env) snprintf(g_pc_path, sizeof g_pc_path, "%s%s", env, fz);
     if (env) path = g_pc_path;
     FILE *f = path ? fopen(path, "rb") : NULL;
-    if (f) { fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET); data = malloc((size_t)n); if (!data || fread(data, 1, (size_t)n, f) != (size_t)n) n = 0; fclose(f); }
+    if (f) { fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET); data = n > 0 ? malloc((size_t)n) : NULL; if (!data || fread(data, 1, (size_t)n, f) != (size_t)n) n = 0; fclose(f); }
+    if (n) {   // the header (VkPipelineCacheHeaderVersionOne) checked before the driver sees it: a file of another GPU or driver version, or a cut one, starts the cache
+               // empty instead of reaching a driver that may take it on trust (a corrupted file then crashed the start, not just missed the cache)
+        VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(g_vk.pd, &pp);
+        const uint8_t *h = data; uint32_t hl, hv, ven, dev; const char *why = NULL;
+        if (n < 32) why = "shorter than its header";
+        else { memcpy(&hl, h, 4); memcpy(&hv, h + 4, 4); memcpy(&ven, h + 8, 4); memcpy(&dev, h + 12, 4);
+               if (hl < 32 || hl > (uint32_t)n || hv != VK_PIPELINE_CACHE_HEADER_VERSION_ONE) why = "not a Vulkan pipeline cache";
+               else if (ven != pp.vendorID || dev != pp.deviceID) why = "another GPU's";
+               else if (memcmp(h + 16, pp.pipelineCacheUUID, VK_UUID_SIZE)) why = "another driver version's (the driver was updated)"; }
+        if (why) { LOG("[vk] pipeline cache %s: %s, %ld bytes left out; the cache starts empty and is written again", path, why, n); n = 0; }
+    }
     VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = (size_t)n, .pInitialData = n ? data : NULL};
     if (vkCreatePipelineCache(g_vk.dev, &ci, NULL, &g_pc) != VK_SUCCESS) { ci.initialDataSize = 0; ci.pInitialData = NULL; vkCreatePipelineCache(g_vk.dev, &ci, NULL, &g_pc); n = 0; }   // a cache of another driver is refused: started empty
     free(data); g_pc_saved = (size_t)n;
@@ -89,8 +100,9 @@ void vkb_pipeline_cache_save(void) {
     size_t n = 0; void *data = NULL;
     if (vkGetPipelineCacheData(g_vk.dev, g_pc, &n, NULL) == VK_SUCCESS && n > g_pc_saved && (data = malloc(n)) && vkGetPipelineCacheData(g_vk.dev, g_pc, &n, data) == VK_SUCCESS) {
         char tmp[620]; snprintf(tmp, sizeof tmp, "%s.new", path); FILE *f = fopen(tmp, "wb");
-        if (f && fwrite(data, 1, n, f) == n && !fclose(f) && !rename(tmp, path)) { LOG("[vk] pipeline cache: %zu bytes written", n); g_pc_saved = n; }
-        else if (f) fclose(f);
+        int ok = f && fwrite(data, 1, n, f) == n; if (f && fclose(f)) ok = 0;   // closed once whatever happened (a failed rename after the close closed it twice)
+        if (ok && !rename(tmp, path)) { LOG("[vk] pipeline cache: %zu bytes written", n); g_pc_saved = n; }
+        else { LOG("[RED] [vk] pipeline cache: writing %s failed (errno %d)", path, errno); remove(tmp); }
     }
     free(data);
     pthread_mutex_unlock(&g_pc_mu);
