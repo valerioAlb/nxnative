@@ -83,9 +83,32 @@ jobs:
           & bin/host/dmhost_cli.exe bin/selftest main 2>&1 | Tee-Object -FilePath selftest.log
           $rc = $LASTEXITCODE
           if (-not (Select-String -Path selftest.log -Pattern 'selftest: PASS' -Quiet)) { throw "the self test did not pass (exit $rc): see the log above" }
+      - name: dmhost.exe (the window program) starts as a double-click does, without a game and with one, and writes log.txt
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $fail = @()
+          foreach ($case in 'selftest', 'game') {
+            $d = "$env:RUNNER_TEMP/gui_$case"; New-Item -ItemType Directory -Force $d | Out-Null
+            Copy-Item bin/host/dmhost.exe $d; Copy-Item -Recurse bin/selftest "$d/selftest"
+            if ($case -eq 'game') { New-Item -ItemType Directory -Force "$d/game" | Out-Null; Copy-Item -Recurse bin/selftest "$d/game/code"; Copy-Item bin/selftest/main.fixups.tsv "$d/game/code/main.fixups.tsv" -ErrorAction SilentlyContinue }
+            $p = Start-Process -FilePath "$d/dmhost.exe" -WorkingDirectory $d -PassThru
+            $done = $p.WaitForExit(25000)
+            if (-not $done) { $p.Kill(); $p.WaitForExit(); $how = 'still running after 25 s (killed)' } else { $how = 'exited with {0:X8}' -f $p.ExitCode }
+            Write-Host "== $case : $how"
+            Get-ChildItem $d | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+            foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 60 | Write-Host } }
+            if (-not (Test-Path "$d/log.txt")) { $fail += "$case : no log.txt ($how)" }
+            elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }
+            Copy-Item "$d/log.txt" "gui_$case.log" -ErrorAction SilentlyContinue; Copy-Item "$d/crash.txt" "gui_$case.crash.txt" -ErrorAction SilentlyContinue
+          }
+          if ($fail) { throw ($fail -join '; ') }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-arm64-run-log
-          path: selftest.log
+          path: |
+            selftest.log
+            gui_*.log
+            gui_*.crash.txt
           if-no-files-found: ignore
