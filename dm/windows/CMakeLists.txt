@@ -28,7 +28,11 @@ set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
 file(MAKE_DIRECTORY ${GEN}/asm ${GEN}/shaders)
 
 option(DM_SPIKE_ONLY "build only the platform checks (woa_spike.exe), no game profile needed" OFF)
-add_executable(woa_spike tests/woa_spike.c plat_slots.c)
+# The manifest (dmhost.manifest: UTF-8 code page, long paths, DPI awareness) in the programs' resources (woa_spike's too: its heap checks run on the same segment heap)
+set(DM_RC ${GEN}/dmhost.rc)
+file(WRITE ${DM_RC} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/dmhost.manifest\"\n")
+set_source_files_properties(${DM_RC} PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dmhost.manifest)
+add_executable(woa_spike tests/woa_spike.c plat_slots.c aligned_windows.c ${DM_RC})
 target_include_directories(woa_spike PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(woa_spike PRIVATE -O1 -g -Wall -ffixed-x18)
 if(DM_SPIKE_ONLY)
@@ -106,6 +110,7 @@ set(WIN_C
   ${CMAKE_CURRENT_SOURCE_DIR}/plat_slots.c
   ${CMAKE_CURRENT_SOURCE_DIR}/plat_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/posix_windows.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/aligned_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_wasapi.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver_windows.c
@@ -143,10 +148,6 @@ target_compile_definitions(dmcore PRIVATE ${DM_DEFS})
 # vulkan-1.dll is opened at run time (vk_driver_windows.c): the build needs no Vulkan SDK
 set(DM_LIBS vpx ole32 uuid winmm avrt xinput1_4 user32 gdi32 shell32 dbghelp synchronization bcrypt psapi pthread)
 
-# The manifest (dmhost.manifest: UTF-8 code page, long paths, DPI awareness) in both programs' resources
-set(DM_RC ${GEN}/dmhost.rc)
-file(WRITE ${DM_RC} "1 24 \"${CMAKE_CURRENT_SOURCE_DIR}/dmhost.manifest\"\n")
-set_source_files_properties(${DM_RC} PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dmhost.manifest)
 
 add_executable(dmhost_app WIN32 $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_windows.c ${AND}/nvn_demo.c ${DM_RC})
 target_include_directories(dmhost_app PRIVATE $<TARGET_PROPERTY:dmcore,INTERFACE_INCLUDE_DIRECTORIES>)

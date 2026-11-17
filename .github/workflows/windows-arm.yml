@@ -83,6 +83,7 @@ jobs:
           & bin/host/dmhost_cli.exe bin/selftest main 2>&1 | Tee-Object -FilePath selftest.log
           $rc = $LASTEXITCODE
           if (-not (Select-String -Path selftest.log -Pattern 'selftest: PASS' -Quiet)) { throw "the self test did not pass (exit $rc): see the log above" }
+          if (Select-String -Path selftest.log -Pattern 'reach past 2\^39' -Quiet) { throw 'the guest address space is past 2^39 (hle_svc.c: the Windows placement below it)' }
       - name: dmhost.exe (the window program) starts as a double-click does, without a game and with one, and writes log.txt
         shell: pwsh
         timeout-minutes: 5

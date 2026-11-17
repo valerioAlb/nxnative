@@ -1101,28 +1101,7 @@ void arc4random_buf(void *buf, size_t n) { BCryptGenRandom(NULL, buf, (ULONG)n, 
 uint32_t arc4random(void) { uint32_t v; arc4random_buf(&v, sizeof v); return v; }
 uint32_t arc4random_uniform(uint32_t n) { if (n < 2) return 0; uint32_t m = -n % n, v; do v = arc4random(); while (v < m); return v % n; }
 
-// ---------------- Aligned blocks freed with free() ----------------
-// posix_memalign: a block from malloc with room for the alignment and a header just below the aligned pointer {raw block, a check word, size}; free / realloc /
-// malloc_usable_size see the header's check word (the pointer's own value mixed with a constant) and take the raw block. A plain malloc block has heap metadata there
-#define AL_MAGIC 0x6d64616c69676e21ull
-typedef struct { void *raw; uint64_t check; size_t n; } al_hdr;
-static al_hdr *al_of(void *p) { if (!p || ((uintptr_t)p & 15)) return NULL; al_hdr *h = (al_hdr *)p - 1; return h->check == (AL_MAGIC ^ (uintptr_t)p) ? h : NULL; }
-int posix_memalign(void **out, size_t align, size_t n) {
-    if (align < sizeof(void *) || (align & (align - 1))) return EINVAL;
-    if (align < 32) align = 32;   // room for the header in front at any alignment
-    uint8_t *raw = malloc(n + align + sizeof(al_hdr)); if (!raw) return ENOMEM;
-    uintptr_t p = ((uintptr_t)raw + sizeof(al_hdr) + align - 1) & ~(uintptr_t)(align - 1);
-    al_hdr *h = (al_hdr *)p - 1; h->raw = raw; h->check = AL_MAGIC ^ p; h->n = n;
-    *out = (void *)p; return 0;
-}
-void *aligned_alloc_dm(size_t align, size_t n) { void *p; return posix_memalign(&p, align, n) ? NULL : p; }
-void dm_win_free(void *p) { al_hdr *h = al_of(p); if (h) { h->check = 0; free(h->raw); } else free(p); }
-void *dm_win_realloc(void *p, size_t n) {
-    al_hdr *h = al_of(p); if (!h) return realloc(p, n);
-    void *q = malloc(n ? n : 1); if (!q) return NULL;
-    memcpy(q, p, h->n < n ? h->n : n); dm_win_free(p); return q;
-}
-size_t malloc_usable_size(void *p) { al_hdr *h = al_of(p); return !p ? 0 : h ? h->n : _msize(p); }
+// ---------------- Aligned blocks freed with free(): aligned_windows.c ----------------
 
 // ---------------- pthread extras ----------------
 // pthread_cond_timedwait_relative_np: winpthreads'

@@ -335,6 +335,17 @@ static void mem_init_once(void) {
     if (heap < pool) heap = pool;
 #endif
     g_reserve = 0x10000000 + heap + DM_GAME_MEM_STACK + alias;
+#ifdef DM_WINDOWS
+    // Windows places a block this size (Pokopia: 78 GB) anywhere in its 128 TB, usually past 2^40 (CI: 0x1aba4000000), where a Switch's 39-bit pointers never are and
+    // a game that keeps pointers in fewer bits cuts them off. The space below 2^39 is nearly empty in a fresh process: the block goes to the first free 1 GB boundary
+    // from 32 GB on (32 MB-aligned, as below), else wherever Windows puts it
+    g_as = NULL;
+    for (uint64_t at = UINT64_C(0x800000000); at + g_reserve <= UINT64_C(1) << 39; at += UINT64_C(0x40000000)) {
+        void *p = mmap((void *)(uintptr_t)at, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p != MAP_FAILED) { g_as = p; break; }
+    }
+    if (!g_as)
+#endif
 #ifdef DM_ANDROID
     // 32 MB-aligned, as the Mac's mmap of a block this size happens to give it: Linux aligns it to a page, so the heap (256 MB in) started 32 KB-aligned, where Horizon's
     // heap is at least 2 MB-aligned. Metroid Prime Remastered then crashed at its first nnMain steps, writing through 0x6aaac0 (docs/reference/memory.md)

@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -221,12 +222,39 @@ static void check_heapstk(void) {
     report("heapstk", opened, "a fault handled with sp on a 256 KiB VirtualAlloc stack, TEB bounds opened (the host's way): %s", opened ? "resumed" : "FAILED");
 }
 
+// aligned_windows.c under dmhost.manifest's segment heap: free() of a large malloc block (page-aligned, nothing mapped below it) must not read below it,
+// and posix_memalign blocks of every alignment still free, resize and report their size (Pokopia's 63 MB module buffer crashed free() on the Surface)
+int posix_memalign(void **out, size_t align, size_t n); void dm_win_free(void *p); void *dm_win_realloc(void *p, size_t n); size_t malloc_usable_size(void *p);
+static void check_heap(void) {
+    static const size_t big[] = {0x3f5fe10, 0x2749480, 64u << 20, 1u << 20, 600u << 10, 0x10000, 4096};
+    int ok = 1, paged = 0;
+    for (int r = 0; r < 3; r++) for (size_t i = 0; i < sizeof big / sizeof *big; i++) {
+        uint8_t *p = malloc(big[i]); if (!p) { ok = 0; continue; }
+        if (!((uintptr_t)p & 0xFFF)) paged++;
+        p[0] = 1; p[big[i] - 1] = 2;
+        if (malloc_usable_size(p) < big[i]) ok = 0;
+        uint8_t *q = dm_win_realloc(p, big[i] + 100); if (!q || q[0] != 1) ok = 0;
+        dm_win_free(q ? q : p);
+    }
+    static const size_t al[] = {16, 32, 64, 4096, 16384, 65536, 1u << 21};
+    void *keep[64]; int nk = 0;
+    for (int r = 0; r < 8; r++) for (size_t i = 0; i < sizeof al / sizeof *al; i++) {
+        void *p = NULL; size_t n = r & 1 ? 0x3f5fe10 : 100 + r * 4096;
+        if (posix_memalign(&p, al[i], n) || ((uintptr_t)p & (al[i] - 1))) { ok = 0; continue; }
+        memset(p, 0x5a, 64);
+        if (malloc_usable_size(p) != n) ok = 0;
+        if (r < 4 && nk < 64) keep[nk++] = p; else { void *q = dm_win_realloc(p, n + 8); if (!q || ((uint8_t *)q)[63] != 0x5a) ok = 0; dm_win_free(q ? q : p); }
+    }
+    while (nk) dm_win_free(keep[--nk]);
+    report("heap", ok, "large blocks (%d of them page-aligned, no header below) and aligned blocks freed, resized and sized: %s", paged, ok ? "ok" : "FAILED");
+}
+
 int main(void) {
     SYSTEM_INFO si; GetNativeSystemInfo(&si);
     printf("woa_spike: arch %u, %lu processors, page %lu, allocation granularity %lu\n", si.wProcessorArchitecture, si.dwNumberOfProcessors, si.dwPageSize, si.dwAllocationGranularity);
     if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_ARM64) { printf("not an arm64 Windows: nothing checked\n"); return 2; }
     AddVectoredExceptionHandler(1, veh);
-    check_slots(); check_fault(); check_lazy(); check_reserve(); check_alias(); check_code(); check_suspend(); check_pac(); check_stack(); check_heapstk();
+    check_slots(); check_fault(); check_lazy(); check_reserve(); check_alias(); check_code(); check_suspend(); check_pac(); check_stack(); check_heapstk(); check_heap();
     printf("woa_spike: %d check(s) failed\n", g_fail);
     return g_fail ? 1 : 0;
 }
