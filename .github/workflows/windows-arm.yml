@@ -89,6 +89,7 @@ jobs:
         timeout-minutes: 5
         env:
           DM_NO_FATAL_BOX: '1'   # no message box waiting for a click on a fatal error
+          DM_WIN_WATCH: '8'      # the watchdog's thread dump, checked below (the self test's window idles after its PASS)
         run: |
           $fail = @()
           foreach ($case in 'selftest', 'game') {
@@ -100,9 +101,10 @@ jobs:
             if (-not $done) { $p.Kill(); $p.WaitForExit(); $how = 'still running after 25 s (killed)' } else { $how = 'exited with {0:X8}' -f $p.ExitCode }
             Write-Host "== $case : $how"
             Get-ChildItem $d | Select-Object Name, Length | Format-Table | Out-String | Write-Host
-            foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 60 | Write-Host } }
+            foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 90 | Write-Host } }
             if (-not (Test-Path "$d/log.txt")) { $fail += "$case : no log.txt ($how)" }
           elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'nxnative on Windows on Arm' -Quiet)) { $fail += "$case : log.txt without the start line ($how)" }
+          elseif ($case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern '\[watch\] threads' -Quiet)) { $fail += "selftest : no watchdog thread dump after 10 s of silence ($how)" }
             elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }
             Copy-Item "$d/log.txt" "gui_$case.log" -ErrorAction SilentlyContinue; Copy-Item "$d/crash.txt" "gui_$case.crash.txt" -ErrorAction SilentlyContinue
           }

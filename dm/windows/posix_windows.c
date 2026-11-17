@@ -97,6 +97,15 @@ static LONG WINAPI unhandled(EXCEPTION_POINTERS *ep);
 static BOOL WINAPI console_ctrl(DWORD type);
 static uint8_t *g_img_lo, *g_img_hi;   // the host's own image (an exception with the pc there is the host's)
 static LARGE_INTEGER g_qpf;
+// Every thread the process makes (the host's, winpthreads', a driver's): 64 KB kept for the exception handler on a stack overflow, which otherwise cannot
+// run and the process just ends; and a line when the process ends through ExitProcess / exit (a TerminateProcess or a fast fail writes none: then that line's
+// absence, with no crash line, says the process was killed or fast-failed)
+static void NTAPI tls_cb(PVOID h, DWORD reason, PVOID r) {
+    (void)h; (void)r;
+    if (reason == DLL_THREAD_ATTACH) { ULONG g = 65536; SetThreadStackGuarantee(&g); }
+    else if (reason == DLL_PROCESS_DETACH) { static const char m[] = "[win] the process is exiting (ExitProcess / exit)\n"; DWORD w; WriteFile(GetStdHandle(STD_ERROR_HANDLE), m, sizeof m - 1, &w, NULL); }
+}
+__attribute__((section(".CRT$XLD"), used)) static const PIMAGE_TLS_CALLBACK g_tls_cb = tls_cb;
 __attribute__((constructor)) static void posix_init(void) {
     _set_fmode(_O_BINARY);
     _setmode(0, _O_BINARY); _setmode(1, _O_BINARY); _setmode(2, _O_BINARY);
@@ -403,8 +412,21 @@ static uint64_t esr_of(const EXCEPTION_RECORD *er) {
     if (er->ExceptionInformation[0] == 8) return (0x20ull << 26) | (1ull << 25);   // an instruction abort (execution of a page without execute)
     return (0x24ull << 26) | (1ull << 25) | (er->ExceptionInformation[0] == 1 ? 1ull << 6 : 0);
 }
+static void where_of(const void *pc, char *out, size_t n);
+static int g_first = -1; static _Atomic int g_first_n;
+static void first_chance(EXCEPTION_RECORD *er, CONTEXT *c, const char *what) {   // one line, without CRT locks (the thread may hold one)
+    char w[MAX_PATH * 3 + 32], b[MAX_PATH * 3 + 200]; where_of((void *)c->Pc, w, sizeof w);
+    int n = snprintf(b, sizeof b, "[win] %s exception %#lx at %s (address %p), thread %lu\n", what, (unsigned long)er->ExceptionCode, w,
+                     er->NumberParameters >= 2 ? (void *)er->ExceptionInformation[1] : er->ExceptionAddress, GetCurrentThreadId());
+    DWORD wr; if (n > 0) WriteFile(GetStdHandle(STD_ERROR_HANDLE), b, (DWORD)(n < (int)sizeof b ? n : (int)sizeof b - 1), &wr, NULL);
+}
 static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord; CONTEXT *c = ep->ContextRecord;
+    // Always: a stack overflow (any thread; the handler runs on the guaranteed stack, SetThreadStackGuarantee in every thread: tls_cb); DM_WIN_FIRSTCHANCE=1: every
+    // exception another module raises or takes (a driver's own, which it may handle), the first 300
+    if (er->ExceptionCode == EXCEPTION_STACK_OVERFLOW) first_chance(er, c, "stack overflow:");
+    if (g_first < 0) { const char *e = getenv("DM_WIN_FIRSTCHANCE"); g_first = e && atoi(e) > 0; }
+    if (g_first && !in_host((void *)c->Pc) && !dm_win_mapped((void *)c->Pc, 4) && atomic_fetch_add(&g_first_n, 1) < 300) first_chance(er, c, "first-chance");
     int code; int sig = sig_of(er->ExceptionCode, &code);
     if (!sig || sig == SIGFPE) return EXCEPTION_CONTINUE_SEARCH;
     int av = er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2;
@@ -439,7 +461,9 @@ int dm_win_default_args(int *argc, char ***argv) {
 }
 // The front end's note of a fatal error (front_windows.c: crash.txt and, with no console, a message box), called once before the process ends
 void (*dm_win_fatal_hook)(const char *what);
-void dm_win_fatal(const char *what) { void (*h)(const char *) = dm_win_fatal_hook; dm_win_fatal_hook = NULL; if (h) h(what); }
+void dm_win_dump_threads(const char *why);   // watch_windows.c
+void dm_win_fatal(const char *what) { void (*h)(const char *) = dm_win_fatal_hook; dm_win_fatal_hook = NULL; dm_win_dump_threads("at the fatal error"); if (h) h(what); }
+void *dm_win_unhandled_filter(void) { return (void *)unhandled; }   // the watchdog puts it back if a DLL replaced it
 static void where_of(const void *pc, char *out, size_t n) {   // "dmhost.exe+0x1234" / "nvoglv64.dll+0x...": the module an address is in
     HMODULE m = NULL; wchar_t w[MAX_PATH]; char a[MAX_PATH * 3];
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)pc, &m) && GetModuleFileNameW(m, w, MAX_PATH)) {

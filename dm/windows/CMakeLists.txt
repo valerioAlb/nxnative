@@ -111,6 +111,7 @@ set(WIN_C
   ${CMAKE_CURRENT_SOURCE_DIR}/plat_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/posix_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/aligned_windows.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/watch_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_wasapi.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_windows.c
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver_windows.c

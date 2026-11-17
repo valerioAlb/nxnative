@@ -645,7 +645,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     char lp[700]; snprintf(lp, sizeof lp, "%s/log.txt", g_dir); keep_prev(lp);
     _snwprintf(g_logw, MAX_PATH + 15, L"%ls\\log.txt", wp);
     int logged = log_open();
+    { char cp[700]; snprintf(cp, sizeof cp, "%s/crash.txt", g_dir); keep_prev(cp); }   // a crash.txt is this start's only: an older one becomes crash.prev.txt
     dm_win_fatal_hook = fatal_note;
+    { void dm_win_watch_start(const wchar_t *log_path); if (logged) dm_win_watch_start(g_logw); }   // watch_windows.c: the threads' states in the log when it goes quiet (DM_WIN_WATCH)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     int argc = 0; LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int console = 0; const char *game_arg = NULL; static char ga[700];
