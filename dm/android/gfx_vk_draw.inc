@@ -518,6 +518,15 @@ static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uin
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
     *out = o; return k;
 }
+// The fragment shader with its discards made demotes and a return (spv_demote.h), in *out (to free); 0 when it has none or DM_SPV_DEMOTE=1 is not on (g_demote)
+static size_t spv_fit_demote(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL; if (!g_demote || !spv_demote_wanted(code, nw)) return 0;
+    size_t need = 0, k = 0; unsigned nk = 0; uint32_t *o = NULL;
+    spv_demote(code, nw, NULL, 0, &need, &nk); if (need && (o = malloc(need * 4))) k = spv_demote(code, nw, o, need, &need, &nk);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] discards made demotes (DM_SPV_DEMOTE=1). First: %s, %u", what, nk);
+    *out = o; return k;
+}
 // The module with each loop's trips capped (spv_loopcap.h), in *out (to free); 0 when it has no loop to cap or the cap is off. On Windows with Qualcomm's driver
 // it is on by default (4096 trips a loop and invocation, vertex, tessellation, geometry and fragment stages): a GPU that stays on one submission for 2 s is
 // reset by Windows (TDR) and takes the whole game with it, and Pokémon Pokopia's Adreno X1-45 lost it at the same menu draws every run, robust access on or

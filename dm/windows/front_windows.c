@@ -600,7 +600,7 @@ static void stall_note(void) {
 // ---------- Settings (settings.ini, the F2 menu): the ones the host reads at its start go into its environment; the others apply at once ----------
 static const struct { const char *key, *env; } k_env[] = {
     {"fps_target", "DM_FPS_TARGET"}, {"opmode", "DM_OPMODE"}, {"render_scale", "DM_RENDER_SCALE"}, {"async_shaders", "DM_VK_ASYNC_PIPE"}, {"vsync", "DM_VSYNC"},
-    {"vk_robust", "DM_VK_ROBUST"}, {"spv_loop_cap", "DM_SPV_LOOP_CAP"}, {"skip_shaders", "DM_VK_SKIP_SHADER"},
+    {"vk_robust", "DM_VK_ROBUST"}, {"spv_loop_cap", "DM_SPV_LOOP_CAP"}, {"skip_shaders", "DM_VK_SKIP_SHADER"}, {"spv_demote", "DM_SPV_DEMOTE"},
 };
 static void settings_env(void) {
     for (size_t i = 0; i < sizeof k_env / sizeof k_env[0]; i++) {

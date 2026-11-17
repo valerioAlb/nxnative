@@ -42,6 +42,7 @@
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_noptr.h"   // raw global memory through a descriptor array, for drivers that refuse OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
+#include "spv_demote.h"   // DM_SPV_DEMOTE=1: a fragment shader's OpKill made a demote and a return (gfx_vk_draw.inc spv_fit_demote)
 #include "spv_loopcap.h"   // every loop of a translated shader ended after a cap of trips, so one that never ends cannot hold the GPU until the driver resets it (gfx_vk_draw.inc spv_fit_loopcap)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
@@ -87,10 +88,12 @@ static int memu_on(void);   // gfx_vk_meshemu.inc: their draws in compute form w
 static int g_fmt_list;   // VK_KHR_image_format_list enabled (vt_create)
 static void pb_dump(void);   // gfx_vk_draw.inc: the pipelines being built, for a crash dump
 static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragment shader writes the stencil test's value (gfx_vk_dscopy.inc)
-static int g_nonuni, g_null_desc, g_rb2_ext;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
+static int g_nonuni, g_null_desc, g_rb2_ext, g_demote;   // g_demote: VK_EXT_shader_demote_to_helper_invocation enabled (DM_SPV_DEMOTE=1)
+   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
 static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
 #include "gfx_vk_floor.inc"   // DM_VK_GPU_FLOOR: a GPU clock floor through KGSL (the launcher's Keep the GPU clock up, off by default)
+static void crumb_cmd(VkCommandBuffer cb, char kind, uint32_t n, uint32_t m);   // a transfer the current chunk recorded, for the hang report (gpu_slow)
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -155,7 +158,7 @@ static int vk_try(char *why, size_t nwhy) {
           LOG("[vk] driver ID %d: %s, %s", (int)id, dp.driverName, dp.driverInfo); }
       g_driver_id = (int)id;
       g_qcom_driver = id ? id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY : g_vk.props.vendorID == 0x5143 && (g_vk.props.driverVersion & 0x80000000u); }
-    const char *dext[19]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
+    const char *dext[24]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
                                               // shader module identifier, pipeline creation cache control, display timing and the three of task / mesh shaders; raw global memory's (gm_feat_take, gm_np_take) take what of the 19 is left
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
     // A DM_VK_DRIVER driver must offer what the window needs (front_android.c vk_init refuses a device without it); the system's driver goes on without, as before
@@ -200,6 +203,7 @@ static int vk_try(char *why, size_t nwhy) {
     int gm = gm_want(de, nd);   // raw global memory (gfx_vk_gmem.inc): asked for only with DM_VK_RAW_GMEM=1
     int dix = has_ext(de, nd, "VK_EXT_descriptor_indexing"), gmdi = gm && (dix || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1);   // its descriptor array's features
     g_rb2_ext = has_ext(de, nd, "VK_EXT_robustness2");
+    int demx; { const char *e = getenv("DM_SPV_DEMOTE"); demx = e && *e == '1' && has_ext(de, nd, "VK_EXT_shader_demote_to_helper_invocation"); if (e && *e == '1' && !demx) LOG("[RED] [vk] DM_SPV_DEMOTE=1: the driver offers no VK_EXT_shader_demote_to_helper_invocation, discards stay OpKill"); }
     free(de);
     VkPhysicalDeviceFeatures want = {.textureCompressionBC = f.textureCompressionBC, .textureCompressionASTC_LDR = f.textureCompressionASTC_LDR,
                                      .textureCompressionETC2 = f.textureCompressionETC2, .independentBlend = f.independentBlend, .geometryShader = f.geometryShader,
@@ -227,12 +231,14 @@ static int vk_try(char *why, size_t nwhy) {
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT diq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = qn}; if (g_nonuni || gmdi) qn = &diq;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pcq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = qn};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT smq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pcq}; if (smid) qn = &smq;
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT dmq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT, .pNext = qn}; if (demx) qn = &dmq;
     if (gm) qn = gm_feat_query(qn);
     VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = qn};
     if (VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 1 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1) vkGetPhysicalDeviceFeatures2(g_vk.pd, &f2);
     hqr = hqr && hq.hostQueryReset;
     if (hqr) dext[nde++] = "VK_EXT_host_query_reset";
     if ((dfault = dfault && ff.deviceFault)) dext[nde++] = "VK_EXT_device_fault";
+    if ((g_demote = demx && dmq.shaderDemoteToHelperInvocation)) { dext[nde++] = "VK_EXT_shader_demote_to_helper_invocation"; LOG("[vk] DM_SPV_DEMOTE=1: fragment shader discards are demotes to helper invocations and a return (spv_demote.h)"); }
     if ((g_nonuni = g_nonuni && diq.shaderSampledImageArrayNonUniformIndexing && f2.features.shaderSampledImageArrayDynamicIndexing)) dext[nde++] = "VK_EXT_descriptor_indexing";
     g_null_desc = g_null_desc && rbq.nullDescriptor;
     int rba2 = rb2 && rbq.robustBufferAccess2 && f.robustBufferAccess, ria2 = rb2 && rbq.robustImageAccess2;
@@ -264,6 +270,7 @@ static int vk_try(char *why, size_t nwhy) {
                                                   .robustBufferAccess2 = rba2 ? VK_TRUE : VK_FALSE, .robustImageAccess2 = ria2 ? VK_TRUE : VK_FALSE}; if (g_null_desc || rba2 || ria2) en = &rbe;
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT die = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = en, .shaderSampledImageArrayNonUniformIndexing = g_nonuni ? VK_TRUE : VK_FALSE};
     if ((gm && gm_np_enable(&die)) || g_nonuni) en = &die;
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT dme = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT, .pNext = en, .shaderDemoteToHelperInvocation = VK_TRUE}; if (g_demote) en = &dme;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pce = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = en, .pipelineCreationCacheControl = VK_TRUE};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT sme = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pce, .shaderModuleIdentifier = VK_TRUE}; if (smid) en = &sme;
     if (gm) en = gm_feat_enable(en);
@@ -412,6 +419,10 @@ static void crumb(char kind, const char *a, const char *b, uint32_t n, uint32_t 
     if (!C) return;
     chunk *c = C; int i = c->ncr++ % CR_MAX; c->cr[i].kind = kind; c->cr[i].a = a; c->cr[i].b = b; c->cr[i].n = n; c->cr[i].m = m;
 }
+// a copy, upload, blit or clear recorded into the current chunk's command buffer (the rec_ wrappers, under g_bk as every vkCmd* of the replay): named in the hang
+// report beside the passes and draws, so a submission the GPU stalled in that holds transfers says so ('u' buffer to image, 'r' image to buffer, 'k' image copy,
+// 'b' blit, 'x' buffer copy, 'l' colour clear, 'L' depth / stencil clear)
+static void crumb_cmd(VkCommandBuffer cb, char kind, uint32_t n, uint32_t m) { if (C && cb == C->cb) crumb(kind, NULL, NULL, n, m); }
 static _Atomic uint64_t g_chunk_wait_ns;   // the replay's time in cur() waiting for a free chunk
 static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_seq, g_seq_done; static _Atomic int g_inflight_wb, g_inflight_cop, g_inflight_fwd, g_inflight_ipw; static int g_drawing;   // g_drawing: a draw is being made (its resources are in C)
@@ -766,6 +777,8 @@ static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
         char x[24] = ""; if (run > 1) snprintf(x, sizeof x, " (x %d, to %d)", run, at + run - 1);
         if (kd == 'p') LOG("[vk]   %d: pass %u x %u%s", at, c->cr[i].n, c->cr[i].m, x);
         else if (kd == 'c' || kd == 'C') LOG("[vk]   %d: %sdispatch, compute %s, %u x %u groups%s", at, kd == 'C' ? "indirect " : "", c->cr[i].a, c->cr[i].n, c->cr[i].m, x);
+        else if (strchr("urkbxlL", kd)) { static const char *const nm[] = {"upload (buffer to image)", "read-back (image to buffer)", "image copy", "blit", "buffer copy", "colour clear", "depth / stencil clear"};
+            LOG("[vk]   %d: %s %u x %u%s", at, nm[strchr("urkbxlL", kd) - "urkbxlL"], c->cr[i].n, c->cr[i].m, x); }
         else LOG("[vk]   %d: %sdraw, vertex %s fragment %s, %u vertices x %u instances%s", at, kd == 'D' ? "indirect " : "", c->cr[i].a, c->cr[i].b ? c->cr[i].b : "-", c->cr[i].n, c->cr[i].m, x);
         k += run; }
 }

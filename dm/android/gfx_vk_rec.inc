@@ -108,6 +108,7 @@ static void rec_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t first, uint3
 }
 typedef struct { VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; VkFilter f; } a_blit;
 static void rec_vkCmdBlitImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage dimg, VkImageLayout dl, uint32_t n, const VkImageBlit *rg, VkFilter f) {
+    crumb_cmd(cb, 'b', n ? (uint32_t)(rg[0].dstOffsets[1].x - rg[0].dstOffsets[0].x) : 0, n ? (uint32_t)(rg[0].dstOffsets[1].y - rg[0].dstOffsets[0].y) : 0);
     if (!rec_on()) { vkCmdBlitImage(cb, s, sl, dimg, dl, n, rg, f); return; }
     uint8_t *r = rq_take(R_BLIT, cb, sizeof(rq_hdr) + sizeof(a_blit) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_blit);
     *(a_blit *)(void *)(r + sizeof(rq_hdr)) = (a_blit){s, sl, dimg, dl, n, f}; RQ_ARR(d, rg, n); rq_push(r);
@@ -120,36 +121,42 @@ static void rec_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t na, const VkC
 }
 typedef struct { VkImage i; VkImageLayout l; VkClearColorValue v; uint32_t n; } a_clrcol;
 static void rec_vkCmdClearColorImage(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue *v, uint32_t n, const VkImageSubresourceRange *rg) {
+    crumb_cmd(cb, 'l', n, 0);
     if (!rec_on()) { vkCmdClearColorImage(cb, i, l, v, n, rg); return; }
     uint8_t *r = rq_take(R_CLRCOL, cb, sizeof(rq_hdr) + sizeof(a_clrcol) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_clrcol);
     *(a_clrcol *)(void *)(r + sizeof(rq_hdr)) = (a_clrcol){i, l, *v, n}; RQ_ARR(d, rg, n); rq_push(r);
 }
 typedef struct { VkImage i; VkImageLayout l; VkClearDepthStencilValue v; uint32_t n; } a_clrds;
 static void rec_vkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearDepthStencilValue *v, uint32_t n, const VkImageSubresourceRange *rg) {
+    crumb_cmd(cb, 'L', n, 0);
     if (!rec_on()) { vkCmdClearDepthStencilImage(cb, i, l, v, n, rg); return; }
     uint8_t *r = rq_take(R_CLRDS, cb, sizeof(rq_hdr) + sizeof(a_clrds) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_clrds);
     *(a_clrds *)(void *)(r + sizeof(rq_hdr)) = (a_clrds){i, l, *v, n}; RQ_ARR(d, rg, n); rq_push(r);
 }
 typedef struct { VkBuffer s, d; uint32_t n; } a_cpb;
 static void rec_vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer sb, VkBuffer db, uint32_t n, const VkBufferCopy *rg) {
+    crumb_cmd(cb, 'x', n, n ? (uint32_t)(rg[0].size >> 10) : 0);
     if (!rec_on()) { vkCmdCopyBuffer(cb, sb, db, n, rg); return; }
     uint8_t *r = rq_take(R_CPB, cb, sizeof(rq_hdr) + sizeof(a_cpb) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_cpb);
     *(a_cpb *)(void *)(r + sizeof(rq_hdr)) = (a_cpb){sb, db, n}; RQ_ARR(d, rg, n); rq_push(r);
 }
 typedef struct { VkBuffer b; VkImage i; VkImageLayout l; uint32_t n; } a_cpb2i;
 static void rec_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b, VkImage i, VkImageLayout l, uint32_t n, const VkBufferImageCopy *rg) {
+    crumb_cmd(cb, 'u', n ? rg[0].imageExtent.width : 0, n ? rg[0].imageExtent.height : 0);
     if (!rec_on()) { vkCmdCopyBufferToImage(cb, b, i, l, n, rg); return; }
     uint8_t *r = rq_take(R_CPB2I, cb, sizeof(rq_hdr) + sizeof(a_cpb2i) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_cpb2i);
     *(a_cpb2i *)(void *)(r + sizeof(rq_hdr)) = (a_cpb2i){b, i, l, n}; RQ_ARR(d, rg, n); rq_push(r);
 }
 typedef struct { VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; } a_cpi;
 static void rec_vkCmdCopyImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage dimg, VkImageLayout dl, uint32_t n, const VkImageCopy *rg) {
+    crumb_cmd(cb, 'k', n ? rg[0].extent.width : 0, n ? rg[0].extent.height : 0);
     if (!rec_on()) { vkCmdCopyImage(cb, s, sl, dimg, dl, n, rg); return; }
     uint8_t *r = rq_take(R_CPI, cb, sizeof(rq_hdr) + sizeof(a_cpi) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_cpi);
     *(a_cpi *)(void *)(r + sizeof(rq_hdr)) = (a_cpi){s, sl, dimg, dl, n}; RQ_ARR(d, rg, n); rq_push(r);
 }
 typedef struct { VkImage i; VkImageLayout l; VkBuffer b; uint32_t n; } a_cpi2b;
 static void rec_vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage i, VkImageLayout l, VkBuffer b, uint32_t n, const VkBufferImageCopy *rg) {
+    crumb_cmd(cb, 'r', n ? rg[0].imageExtent.width : 0, n ? rg[0].imageExtent.height : 0);
     if (!rec_on()) { vkCmdCopyImageToBuffer(cb, i, l, b, n, rg); return; }
     uint8_t *r = rq_take(R_CPI2B, cb, sizeof(rq_hdr) + sizeof(a_cpi2b) + n * sizeof *rg), *d = r + sizeof(rq_hdr) + sizeof(a_cpi2b);
     *(a_cpi2b *)(void *)(r + sizeof(rq_hdr)) = (a_cpi2b){i, l, b, n}; RQ_ARR(d, rg, n); rq_push(r);

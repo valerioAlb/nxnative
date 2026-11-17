@@ -55,6 +55,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }
     uint32_t *lb = NULL; size_t lbn = tff || alpha ? 0 : spv_fit_lbase(code, n, path, &lb); if (lbn) { free(code); code = lb; n = lbn; }   // the layer less or plus a base (not in the capture's wrapper, nor beside the alpha test's push constant)
     uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)
+    uint32_t *dm = NULL; size_t dmn = spv_fit_demote(code, n, path, &dm); if (dmn) { free(code); code = dm; n = dmn; }   // DM_SPV_DEMOTE=1: discards as demotes (spv_demote.h)
     uint32_t *lc = NULL; size_t lcn = spv_fit_loopcap(code, n, path, &lc); if (lcn) { free(code); code = lc; n = lcn; }   // every loop ended after a cap of trips (spv_loopcap.h)
     uint32_t *pr = NULL; size_t prn = spv_fit_precise(code, n, path, &pr); if (prn) { free(code); code = pr; n = prn; }   // FMUL and FADD unfused where vertices are placed
     if (alpha) {   // NVN's alpha test, run in a wrapper entry point (spv_alpha.h); a shader it does not apply to is no module
