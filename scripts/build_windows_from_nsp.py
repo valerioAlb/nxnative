@@ -169,6 +169,14 @@ def only(w, a):
         for b in (src, src.parent):
             cands += sorted(b.glob(f'{a.title_id.upper() if a.title_id else "*"}_windows'))
     st = next((c / STATE for c in cands if (c / STATE).is_file()), None)
+    gj = next((c / 'game' / 'game.json' for c in cands if (c / 'game' / 'game.json').is_file()), None)
+    if st is None and a.only == 'host' and gj is not None:   # a folder a build before build_state.json staged: its game.json names the profile
+        gid = json.loads(gj.read_text(encoding='utf-8')).get('title_id', '').upper()
+        if not re.fullmatch(r'[0-9A-F]{16}', gid): raise BuildError(f'{gj}: no title ID')
+        out = gj.parent.parent; work = ba.data_dir().parent / 'windows' / gid / 'work'; logs = work / 'logs'; logs.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, PYTHONUTF8='1')
+        bi.PROG.stage('Windows host'); exes = w.host(gid, work, logs, env); stt = w.selftest(work, logs, env); bi.PROG.end(str(exes[0]))
+        w.stage_host(out, exes, stt); say(f'done: {out} (host rebuilt; game/ unchanged)'); return
     if st is None: raise BuildError(f'--only {a.only}: no {STATE} from a full build in {", ".join(map(str, cands)) or "(give --out <the game folder> or the NSP folder / .nup)"}: run a full build once')
     s = json.loads(st.read_text(encoding='utf-8')); out = st.parent; work = Path(s['work']); logs = work / 'logs'; logs.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, **s['env'])

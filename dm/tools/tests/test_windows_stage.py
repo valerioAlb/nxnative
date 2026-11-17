@@ -67,5 +67,15 @@ class Only(unittest.TestCase):
         self.assertEqual(seen, dict(gid='0400A3A01EE4C000', work=work, target='windows')); self.assertTrue((out / 'dmhost.exe').is_file())
 
 
+    def test_host_from_an_older_folder_with_only_game_json(self):   # staged before build_state.json existed
+        out = self.tmp / 'pokopia'; (out / 'game').mkdir(parents=True); (out / 'game/game.json').write_text(json.dumps({'title_id': '0400a3a01ee4c000'}))
+        exe = self.tmp / 'dmhost.exe'; exe.write_text('x'); st = self.tmp / 'st'; st.mkdir(); seen = {}
+        def host(self_, gid, w, logs, env): seen['gid'] = gid; return (exe,)
+        with mock.patch.object(bw, 'llvm_mingw', return_value=self.tmp), mock.patch.object(bw.Windows, 'host', host), mock.patch.object(bw.Windows, 'selftest', return_value=st), \
+             mock.patch.object(bw.ba, 'data_dir', return_value=self.tmp / 'data' / 'android'):
+            bw.main(['--only', 'host', '--out', str(out)])
+        self.assertEqual(seen['gid'], '0400A3A01EE4C000'); self.assertTrue((out / 'dmhost.exe').is_file())
+
+
 if __name__ == '__main__':
     unittest.main()
