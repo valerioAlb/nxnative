@@ -180,8 +180,33 @@ Controls:
 | ZL / ZR | Q / O |
 | Stick clicks | F / H |
 | + / − | Enter / Backspace |
-| Touch | the mouse |
+| Touch | the mouse, or the touch screen where no control is |
+| Touch controls on / off | F1 |
 | Full screen | F11 or Alt+Enter |
+
+### Touch controls and settings
+
+On a touch screen (Surface) the Switch's controls are drawn over the game, semi-transparent: both sticks, the D-pad, A/B/X/Y,
+L/R/ZL/ZR, +/− and the stick clicks (LS/RS). Several fingers work at once, and a finger can slide from one button to the next.
+A touch on no control goes to the game's own touch screen. In `auto` mode the controls hide as soon as a key or the controller
+is used, and come back with the next touch. F1 shows or hides them and remembers the choice.
+
+Settings live in `%LOCALAPPDATA%\nxnative\<title ID>\settings.ini`, one `key=value` per line. The program writes this file
+itself, and each key can also be given in `env.txt` as `DM_<KEY>`, for example `DM_TOUCH_OPACITY=0.4`:
+
+| Key | Values | Default |
+|---|---|---|
+| `touch_overlay` | `auto` (shown on a touch screen, hidden while a key or the controller is used), `on`, `off` | `auto` |
+| `touch_opacity` | 0 to 1 | 0.6 |
+| `touch_scale` | 0.5 to 2 | 1 |
+| `touch.<control>` | `x,y[,r]`: units of the window's shorter side, negative counts from the right or bottom edge; `r` 0 hides it. Controls: `lstick rstick dpad a b x y l r zl zr plus minus ls rs` | built-in layout |
+| `stall_note` | seconds without a new frame before the "Still working" note shows (0: never) | 3 |
+
+Example: `touch.a=-0.12,-0.6,0.07` makes A bigger, and `touch.ls=0,0,0` hides the stick click.
+
+Until the first frame the window shows a loader: the game's name, a spinner, the current phase (modules, memory, graphics,
+pipeline cache...), the elapsed time and the number of shaders and pipelines compiled so far. When the picture stops changing
+for a few seconds later on (a level loading, shaders compiling), a small "Still working" note with a spinner appears at the top.
 
 ## Tested so far
 

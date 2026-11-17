@@ -150,7 +150,8 @@ target_compile_definitions(dmcore PRIVATE ${DM_DEFS})
 set(DM_LIBS vpx ole32 uuid winmm avrt xinput1_4 user32 gdi32 shell32 dbghelp synchronization bcrypt psapi pthread)
 
 
-add_executable(dmhost_app WIN32 $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_windows.c ${AND}/nvn_demo.c ${DM_RC})
+add_executable(dmhost_app WIN32 $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_windows.c ${CMAKE_CURRENT_SOURCE_DIR}/overlay_windows.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/settings_windows.c ${CMAKE_CURRENT_SOURCE_DIR}/touchpad.c ${AND}/nvn_demo.c ${DM_RC})
 target_include_directories(dmhost_app PRIVATE $<TARGET_PROPERTY:dmcore,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_options(dmhost_app PRIVATE $<$<COMPILE_LANGUAGE:C>:${DM_CFLAGS} -ffixed-x18>)
 target_compile_definitions(dmhost_app PRIVATE ${DM_DEFS})

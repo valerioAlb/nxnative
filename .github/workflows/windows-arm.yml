@@ -44,6 +44,8 @@ jobs:
           cmake -G Ninja -S dm/windows -B build/host -DCMAKE_TOOLCHAIN_FILE=$PWD/dm/windows/cmake/aarch64-w64-mingw32.cmake -DGAME=$GAME
           ninja -C build/host -k 0 dmhost_app dmhost_cli 2>&1 | tee build/host.log
           test -f build/host/dmhost.exe && test -f build/host/dmhost_cli.exe
+      - name: Touch controls (dm/windows/touchpad.c) on the build machine
+        run: cc -O1 -Wall -Werror -I dm/host -I dm/windows dm/windows/tests/t_touchpad.c dm/windows/touchpad.c -lm -o build/t_touchpad && build/t_touchpad
       - name: Rewriter for Windows (DM_TARGET=windows) on the synthetic module
         env:
           DM_SELFTEST_OUT: build/selftest
@@ -89,6 +91,7 @@ jobs:
         timeout-minutes: 5
         env:
           DM_NO_FATAL_BOX: '1'   # no message box waiting for a click on a fatal error
+          DM_TOUCH_OVERLAY: 'on'  # the touch controls' layered window made and drawn (settings.ini touch_overlay; no touch screen on the runner)
           DM_WIN_WATCH: '8'      # the watchdog's thread dump, checked below (the self test's window idles after its PASS)
         run: |
           $fail = @()
@@ -104,6 +107,7 @@ jobs:
             foreach ($f in 'log.txt', 'crash.txt') { if (Test-Path "$d/$f") { Write-Host "---- $f"; Get-Content "$d/$f" -Tail 90 | Write-Host } }
             if (-not (Test-Path "$d/log.txt")) { $fail += "$case : no log.txt ($how)" }
           elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'nxnative on Windows on Arm' -Quiet)) { $fail += "$case : log.txt without the start line ($how)" }
+          elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'touch controls: on \(shown' -Quiet)) { $fail += "$case : the touch controls were not shown ($how)" }
           elseif ($case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern '\[watch\] threads' -Quiet)) { $fail += "selftest : no watchdog thread dump after 10 s of silence ($how)" }
             elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }
             Copy-Item "$d/log.txt" "gui_$case.log" -ErrorAction SilentlyContinue; Copy-Item "$d/crash.txt" "gui_$case.crash.txt" -ErrorAction SilentlyContinue

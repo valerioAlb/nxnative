@@ -9,7 +9,9 @@
 //   a status screen. F11 or Alt+Enter: full screen (borderless). The window's close ends the game as SIGTERM does (hle_lifecycle.c), saving what the game saved.
 //   Input: an XInput controller (Xbox layout, buttons by position: the Switch's A is the right face button; DM_PAD_ABXY=label maps by label) is player 1, with
 //   rumble; more controllers are players 2-4. The keyboard is player 1 too (Ryujinx's default keys): left stick WASD, right stick IJKL, D-pad arrows,
-//   A Z, B X, X C, Y V, L E, R U, ZL Q, ZR O, + Enter or =, - Backspace or -, stick clicks F and H. The mouse's left button is the touch screen.
+//   A Z, B X, X C, Y V, L E, R U, ZL Q, ZR O, + Enter or =, - Backspace or -, stick clicks F and H. The mouse's left button and a touch on no control are the touch screen;
+//   the touch controls (overlay_windows.c, F1) are drawn over the picture. Until the first frame: the loader (status_draw); a long stall later: a note (stall_note).
+//   Settings: settings.ini in the data folder (settings_windows.c)
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
 #include <windowsx.h>
@@ -24,6 +26,8 @@
 #include <vulkan/vulkan_win32.h>   // (the SDK header: its types only; the call goes through the instance)
 #include "game_profile.h"
 #include "hle_haptics.h"
+#include "winfront.h"
+#include "touchpad.h"
 #include <stdatomic.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -38,7 +42,9 @@ PFN_vkGetInstanceProcAddr dm_vk_instance_proc(void);   // vk_driver_windows.c
 enum { ST_START, ST_SELFTEST, ST_PASS, ST_FAIL, ST_GAME, ST_ENDED, ST_CRASHED, ST_DEMO };
 static _Atomic int g_state = ST_START;
 static _Atomic uint64_t g_frames;
-static char g_dir[600], g_game[700], g_data[700], g_last[200];
+static char g_dir[600], g_game[700], g_data[700], g_last[200], g_phase[80] = "Starting";
+static uint64_t g_t0;   // the program's start (dm_win_mono_ns)
+void mtl_create_stats(uint64_t *modules, uint64_t *pipelines);   // gfx_vk.c: shader modules and pipelines made so far
 static pthread_mutex_t g_txt_mu = PTHREAD_MUTEX_INITIALIZER;
 static HWND g_wnd;
 static _Atomic int g_closing;
@@ -56,7 +62,15 @@ static void log_line(char *s) {
     if (strstr(s, "selftest: PASS")) atomic_store(&g_state, ST_PASS);
     else if (strstr(s, "selftest: FAIL")) atomic_store(&g_state, ST_FAIL);
     if (strstr(s, "CRASH") || strstr(s, "FATAL")) atomic_store(&g_state, ST_CRASHED);
-    pthread_mutex_lock(&g_txt_mu); snprintf(g_last, sizeof g_last, "%s", s); pthread_mutex_unlock(&g_txt_mu);
+    static const struct { const char *pat, *phase; } ph[] = {
+        {"game in ", "Reading the game's code"}, {"modules:", "Loading the game's modules"}, {"reloc ", "Linking the game's modules"},
+        {">>> nnosInitialize", "Starting the system services"}, {"[mem] heap", "Setting up the game's memory"}, {"DT_INIT", "Running the game's initializers"},
+        {">>> nnMain", "Starting the game"}, {"fs mount rom", "Opening the game's data"}, {"WindowInitialize", "Setting up the graphics"},
+        {"chunks in flight", "Setting up the graphics"}, {"pipeline cache:", "Loading the pipeline cache"}, {"OpenAudioOut", "Starting the audio"},
+        {"fs mount save", "Opening the save data"}, {"colour target", "Drawing the first frames"},
+    };
+    const char *np = NULL; for (size_t i = 0; i < sizeof ph / sizeof ph[0]; i++) if (strstr(s, ph[i].pat)) { np = ph[i].phase; break; }
+    pthread_mutex_lock(&g_txt_mu); snprintf(g_last, sizeof g_last, "%s", s); if (np) snprintf(g_phase, sizeof g_phase, "%s", np); pthread_mutex_unlock(&g_txt_mu);
 }
 static void *log_follow(void *p) {
     (void)p;
@@ -398,6 +412,12 @@ static void status_text(const char *s, int x, int y, int size, COLORREF c) {
     HGDIOBJ o = SelectObject(g_sdc, f); SetTextColor(g_sdc, c); SetBkMode(g_sdc, TRANSPARENT);
     TextOutW(g_sdc, x, y, w, (int)wcslen(w)); SelectObject(g_sdc, o); DeleteObject(f);
 }
+static void status_text_c(const char *s, int cx, int y, int size, COLORREF c) {   // centred on cx
+    wchar_t w[512]; MultiByteToWideChar(CP_UTF8, 0, s, -1, w, 512);
+    HFONT f = CreateFontW(-size, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HGDIOBJ o = SelectObject(g_sdc, f); SIZE ts; GetTextExtentPoint32W(g_sdc, w, (int)wcslen(w), &ts); SetTextColor(g_sdc, c); SetBkMode(g_sdc, TRANSPARENT);
+    TextOutW(g_sdc, cx - ts.cx / 2, y - ts.cy / 2, w, (int)wcslen(w)); SelectObject(g_sdc, o); DeleteObject(f);
+}
 static void status_draw(void) {
     if (!g_sc || !g_stgp) return;
     if (g_sw != g_ext2.width || g_sh != g_ext2.height) {
@@ -411,15 +431,30 @@ static void status_draw(void) {
     static const COLORREF bg[] = {RGB(0x20, 0x18, 0x10), RGB(0x20, 0x18, 0x10), RGB(0x1E, 0x3B, 0x0E), RGB(0x10, 0x10, 0x4A), RGB(0x20, 0x18, 0x10), RGB(0x20, 0x20, 0x20), RGB(0x10, 0x10, 0x4A), RGB(0x20, 0x18, 0x10)};
     RECT all = {0, 0, (LONG)g_sw, (LONG)g_sh}; HBRUSH br = CreateSolidBrush(bg[st]); FillRect(g_sdc, &all, br); DeleteObject(br);
     int u = (int)((g_sw < g_sh ? g_sw : g_sh) / 20); if (u < 8) u = 8; int y = u;
-    status_text("nxnative \u2014 Windows on Arm", u, y, (int)(1.4 * u), RGB(255, 255, 255)); y += 2 * u;
-    char line[300]; snprintf(line, sizeof line, "%s (%s)", DM_GAME_NAME, DM_GAME_ID); status_text(line, u, y, (int)(0.7 * u), RGB(0xE0, 0xE0, 0xE0)); y += u;
-    static const char *what[] = {"starting", "self test running", "self test PASSED", "self test FAILED", "game running", "host finished", "host crashed: see log.txt", "NVN picture check"};
-    snprintf(line, sizeof line, "state: %s", what[st]); status_text(line, u, y, (int)(0.9 * u), RGB(0xE0, 0xE0, 0xE0)); y += (int)(1.3 * u);
-    if (st == ST_GAME) {
-        snprintf(line, sizeof line, "frames presented: %llu", (unsigned long long)atomic_load(&g_frames)); status_text(line, u, y, (int)(0.7 * u), RGB(0xE0, 0xE0, 0xE0)); y += u;
-        status_text("Loading the game... (the first start compiles its shaders)", u, y, (int)(0.55 * u), RGB(0x80, 0xD0, 0xFF)); y += u;
+    char line[300];
+    if (st == ST_START || st == ST_GAME) {   // the loader: the game's name, a spinner, the phase from the log, the time and what the GPU has compiled
+        GdiFlush();   // the background's fill lands before the spinner's pixels
+        status_text_c(DM_GAME_NAME, (int)g_sw / 2, (int)(g_sh * 0.22), (int)(1.5 * u), RGB(255, 255, 255));
+        status_text_c(DM_GAME_ID " \u2014 nxnative, Windows on Arm", (int)g_sw / 2, (int)(g_sh * 0.22) + 2 * u, (int)(0.55 * u), RGB(0xA0, 0xA8, 0xB0));
+        double t = (double)(dm_win_mono_ns() - g_t0) / 1e9; float cx = (float)g_sw / 2, cy = (float)g_sh * 0.5f;
+        for (int k = 0; k < 12; k++) {
+            double an = k * M_PI / 6 - M_PI / 2; float ph = (float)fmod(t * 1.1 - k / 12.0 + 12, 1.0);
+            tp_disc(g_spx, (int)g_sw, (int)g_sh, cx + (float)(cos(an) * 1.3 * u), cy + (float)(sin(an) * 1.3 * u), (float)u * 0.16f, 0x8FD8FF, 0.15f + 0.85f * (1 - ph));
+        }
+        char ph[80]; pthread_mutex_lock(&g_txt_mu); snprintf(ph, sizeof ph, "%s", g_phase); pthread_mutex_unlock(&g_txt_mu);
+        status_text_c(ph, (int)g_sw / 2, (int)(cy + 2.6 * u), (int)(0.85 * u), RGB(0xE8, 0xE8, 0xE8));
+        uint64_t mods = 0, pipes = 0; if (st == ST_GAME) mtl_create_stats(&mods, &pipes);
+        int sec = (int)t; snprintf(line, sizeof line, "%d:%02d", sec / 60, sec % 60);
+        if (mods || pipes) snprintf(line + strlen(line), sizeof line - strlen(line), "  \u00b7  shaders %llu  \u00b7  pipelines %llu", (unsigned long long)mods, (unsigned long long)pipes);
+        status_text_c(line, (int)g_sw / 2, (int)(cy + 3.8 * u), (int)(0.6 * u), RGB(0xB0, 0xB8, 0xC0));
+        if (t > 20) status_text_c("The first start compiles the game's shaders and takes longer; later starts reuse them.", (int)g_sw / 2, (int)(cy + 4.9 * u), (int)(0.48 * u), RGB(0x80, 0xD0, 0xFF));
+    } else {
+        status_text("nxnative \u2014 Windows on Arm", u, y, (int)(1.4 * u), RGB(255, 255, 255)); y += 2 * u;
+        snprintf(line, sizeof line, "%s (%s)", DM_GAME_NAME, DM_GAME_ID); status_text(line, u, y, (int)(0.7 * u), RGB(0xE0, 0xE0, 0xE0)); y += u;
+        static const char *what[] = {"starting", "self test running", "self test PASSED", "self test FAILED", "game running", "host finished", "host crashed: see log.txt", "NVN picture check"};
+        snprintf(line, sizeof line, "state: %s", what[st]); status_text(line, u, y, (int)(0.9 * u), RGB(0xE0, 0xE0, 0xE0)); y += (int)(1.3 * u);
+        if (st == ST_SELFTEST || st == ST_PASS || st == ST_FAIL) { snprintf(line, sizeof line, "No game in %s", g_game); status_text(line, u, y, (int)(0.5 * u), RGB(0xA0, 0xA0, 0xA0)); }
     }
-    if (st == ST_SELFTEST || st == ST_PASS || st == ST_FAIL) { snprintf(line, sizeof line, "No game in %s", g_game); status_text(line, u, y, (int)(0.5 * u), RGB(0xA0, 0xA0, 0xA0)); }
     pthread_mutex_lock(&g_txt_mu); snprintf(line, sizeof line, "%.150s", g_last); pthread_mutex_unlock(&g_txt_mu);
     status_text(line, u, (int)g_sh - (int)(1.2 * u), (int)(0.45 * u), RGB(0x90, 0x90, 0x90));
     GdiFlush();
@@ -451,7 +486,7 @@ static int frame_draw(void) {
     int cw = fr.crop[2] > 0 ? fr.crop[2] : (int)fr.w, ch = fr.crop[3] > 0 ? fr.crop[3] : (int)fr.h;
     double sx = (double)g_ext2.width / cw, sy = (double)g_ext2.height / ch, sc = sx < sy ? sx : sy;
     int dw = (int)(cw * sc), dh = (int)(ch * sc), dx = ((int)g_ext2.width - dw) / 2, dy = ((int)g_ext2.height - dh) / 2;
-    g_pic[0] = dx; g_pic[1] = dy; g_pic[2] = dw; g_pic[3] = dh;
+    g_pic[0] = dx; g_pic[1] = dy; g_pic[2] = dw; g_pic[3] = dh; ovl_picture(g_pic);
     VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{fr.crop[0], fr.crop[1], 0}, {fr.crop[0] + cw, fr.crop[1] + ch, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (fr.flip) { bl.srcOffsets[0].y = fr.crop[1] + ch; bl.srcOffsets[1].y = fr.crop[1]; }
@@ -501,6 +536,9 @@ static void publish(void) {
         if (tilted(g_xi_ax[0][0], g_xi_ax[0][1])) { lx = g_xi_ax[0][0]; ly = g_xi_ax[0][1]; }
         if (tilted(g_xi_ax[0][2], g_xi_ax[0][3])) { rx = g_xi_ax[0][2]; ry = g_xi_ax[0][3]; }
     }
+    uint64_t tb; int32_t ta[4]; ovl_input(&tb, ta); b |= tb;   // the touch controls (overlay_windows.c): a tilted touch stick wins too
+    if (tilted(ta[0], ta[1])) { lx = ta[0]; ly = ta[1]; }
+    if (tilted(ta[2], ta[3])) { rx = ta[2]; ry = ta[3]; }
     dm_input_set(b, lx, ly, rx, ry);
 }
 // Rumble: the host's sink runs under its lock and must not call the hardware, so it only stores the motors' levels; the main loop applies them
@@ -522,6 +560,7 @@ static void xinput_poll(void) {
         if (g_xi_ok[i] != was) { LOG("controller %d %s (XInput)", i + 1, g_xi_ok[i] ? "connected" : "disconnected"); dm_haptics_route(i, g_xi_ok[i]); applied[i] = ~0u; }
         if (!g_xi_ok[i]) continue;
         g_xi_btn[i] = xi_buttons(&xs.Gamepad);
+        { static DWORD seen[4]; if (xs.dwPacketNumber != seen[i]) { if (seen[i] && (g_xi_btn[i] || tilted(xi_axis(xs.Gamepad.sThumbLX, 8000), xi_axis(xs.Gamepad.sThumbLY, 8000)))) ovl_other_input(); seen[i] = xs.dwPacketNumber; } }
         g_xi_ax[i][0] = xi_axis(xs.Gamepad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE); g_xi_ax[i][1] = xi_axis(xs.Gamepad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
         g_xi_ax[i][2] = xi_axis(xs.Gamepad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE); g_xi_ax[i][3] = xi_axis(xs.Gamepad.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
         if (i) { dm_pad_set_player(i, g_xi_btn[i], g_xi_ax[i][0], g_xi_ax[i][1], g_xi_ax[i][2], g_xi_ax[i][3]); mask |= 1u << i; }
@@ -553,16 +592,16 @@ static uint64_t key_button(WPARAM vk) {
     default: return 0;
     }
 }
-// The mouse's left button as one finger on the touch screen, in the picture's rectangle
-static int g_touching;
-static void mouse_touch(LPARAM l, int down) {
-    int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
-    if (!down) { if (g_touching) { g_touching = 0; dm_touch_set(NULL, 0); } return; }
-    int pw = g_pic[2] ? g_pic[2] : (int)g_ext2.width, ph = g_pic[3] ? g_pic[3] : (int)g_ext2.height;
-    if (pw <= 0 || ph <= 0) return;
-    float fx = (float)(x - g_pic[0]) / pw, fy = (float)(y - g_pic[1]) / ph;
-    if (fx < 0) fx = 0; if (fx > 0.999f) fx = 0.999f; if (fy < 0) fy = 0; if (fy > 0.999f) fy = 0.999f;
-    dm_touch t = {0, fx, fy}; g_touching = 1; dm_touch_set(&t, 1);
+// A long stall after the first frame (shaders compiling, a level loading): a note with a spinner over the picture, so a still picture does not look frozen
+static void stall_note(void) {
+    static uint64_t seen_n, seen_at; uint64_t now = dm_win_mono_ns();
+    if (atomic_load(&g_state) != ST_GAME || !g_shown) { ovl_badge(NULL); seen_at = now; return; }
+    if (g_shown != seen_n) { seen_n = g_shown; seen_at = now; ovl_badge(NULL); return; }
+    double idle = (double)(now - seen_at) / 1e9;
+    if (idle < st_num("stall_note", 3) || GetForegroundWindow() != g_wnd || st_num("stall_note", 3) <= 0) { ovl_badge(NULL); return; }
+    uint64_t mods = 0, pipes = 0; mtl_create_stats(&mods, &pipes); char t[160];
+    snprintf(t, sizeof t, "Still working (%.0f s)  \u00b7  shaders %llu, pipelines %llu", idle, (unsigned long long)mods, (unsigned long long)pipes);
+    ovl_badge(t);
 }
 
 // ---------- The window ----------
@@ -598,6 +637,7 @@ static void close_game(void) {
     ExitProcess(0);
 }
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    { LRESULT r; if (ovl_wndproc(h, m, w, l, &r)) { publish(); return r; } }   // touch, pen and the mouse's left button: the touch controls or the game's touch screen
     int game = atomic_load(&g_state) == ST_GAME;
     switch (m) {
     case WM_CLOSE: close_game(); return 0;
@@ -616,15 +656,13 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_KEYDOWN: case WM_KEYUP: {
         int down = m == WM_KEYDOWN;
         if (down && w == VK_F11) { full_screen(!g_full); return 0; }
+        if (down && w == VK_F1) { ovl_toggle(); publish(); return 0; }
         if (down && w == VK_ESCAPE && g_full) { full_screen(0); return 0; }
-        if (key_axis_set(w, down)) { publish(); return 0; }
+        if (key_axis_set(w, down)) { if (down) ovl_other_input(); publish(); return 0; }
         uint64_t b = key_button(w);
-        if (b) { if (down) g_key_btn |= b; else g_key_btn &= ~b; publish(); return 0; }
+        if (b) { if (down) { g_key_btn |= b; ovl_other_input(); } else g_key_btn &= ~b; publish(); return 0; }
         break;
     }
-    case WM_LBUTTONDOWN: SetCapture(h); mouse_touch(l, 1); return 0;
-    case WM_MOUSEMOVE: if (g_touching) mouse_touch(l, 1); return 0;
-    case WM_LBUTTONUP: ReleaseCapture(); mouse_touch(l, 0); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(h, &ps); EndPaint(h, &ps); g_shown = 0; return 0; }
     }
@@ -662,6 +700,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &la))) { utf8_of(la, l8, sizeof l8); CoTaskMemFree(la); }
         snprintf(g_data, sizeof g_data, "%s/nxnative/%s", l8[0] ? l8 : g_dir, DM_GAME_ID); mkdirs(g_data);
     }
+    st_load(g_data); g_t0 = dm_win_mono_ns();
     log_start(console);
     if (!logged) LOG("[RED] cannot write %s: is the folder read-only? (the log goes to the console only)", lp);
     LOG("nxnative on Windows on Arm: %s (%s), program folder %s, game %s, data %s", DM_GAME_NAME, DM_GAME_ID, g_dir, game_arg ? game_arg : g_game, g_data);
@@ -682,6 +721,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (!g_wnd) { LOG("[RED] cannot make the window (error %lu)", (unsigned long)GetLastError()); return 1; }
     ShowWindow(g_wnd, show == SW_HIDE ? SW_SHOWNORMAL : show); UpdateWindow(g_wnd);
     { const char *fs = getenv("DM_FULLSCREEN"); if (fs && atoi(fs)) full_screen(1); }
+    ovl_init(g_wnd);
     if (!vk_window_up()) LOG("[RED] no picture: the window's Vulkan swapchain failed (the lines above say why); the game still runs");
     start_host(game_arg);
     for (;;) {
@@ -694,7 +734,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         xinput_poll();
-        if (!frame_draw()) status_draw();
+        if (!frame_draw()) { static uint64_t last; uint64_t now = dm_win_mono_ns(); if (now - last > 33000000ull) { last = now; status_draw(); } }   // the loader, 30 times a second
+        stall_note();
+        ovl_follow();
         vk_start_tick();
     }
 }
