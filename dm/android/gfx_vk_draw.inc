@@ -518,6 +518,36 @@ static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uin
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
     *out = o; return k;
 }
+// The module with each loop's trips capped (spv_loopcap.h), in *out (to free); 0 when it has no loop to cap or the cap is off. On Windows with Qualcomm's driver
+// it is on by default (4096 trips a loop and invocation, vertex, tessellation, geometry and fragment stages): a GPU that stays on one submission for 2 s is
+// reset by Windows (TDR) and takes the whole game with it, and Pokémon Pokopia's Adreno X1-45 lost it at the same menu draws every run, robust access on or
+// off. DM_SPV_LOOP_CAP=<n> (env.txt, settings.ini spv_loop_cap): n trips (0: off, anywhere); DM_SPV_LOOP_CAP_CS=1: compute shaders too
+static uint32_t loopcap_n(void) {
+    static int64_t v = -1;
+    if (v < 0) { const char *e = getenv("DM_SPV_LOOP_CAP");
+#ifdef _WIN32
+        int64_t d = g_qcom_driver ? 4096 : 0;
+#else
+        int64_t d = 0;
+#endif
+        v = e && *e ? strtoll(e, NULL, 0) : d; if (v < 0 || v > 0x7fffffff) v = 0;
+        LOG("[vk] shader loops: %s%lld trips a loop and invocation at most (spv_loopcap; DM_SPV_LOOP_CAP=<n>, 0 off%s)", v ? "" : "not capped", v ? (long long)v : 0LL, e && *e ? ", set" : ", the default"); }
+    return (uint32_t)v;
+}
+static _Atomic uint64_t g_lc_mods, g_lc_loops, g_lc_skip;
+static size_t spv_fit_loopcap(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL; uint32_t cap = loopcap_n(); if (!cap || nw < 5) return 0;
+    int model = spv_loopcap_model(code, nw);
+    if (model == 5) { static int cs = -1; if (cs < 0) { const char *e = getenv("DM_SPV_LOOP_CAP_CS"); cs = e && *e == '1'; } if (!cs) return 0; }
+    uint32_t *s = malloc(4 * (size_t)code[3]); spv_lc_loop *L = malloc(SPV_LOOPCAP_MAX * sizeof *L); size_t need = 0, k = 0; unsigned nc = 0, ns = 0; uint32_t *o = NULL;
+    if (s && L) { spv_loopcap(code, nw, cap, s, L, NULL, 0, &need, &nc, &ns); if (need && (o = malloc(need * 4))) k = spv_loopcap(code, nw, cap, s, L, o, need, &need, &nc, &ns); }
+    free(s); free(L);
+    if (ns) { atomic_fetch_add(&g_lc_skip, ns); static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[vk] %s: %u loop(s) shaped otherwise, not capped (spv_loopcap)", what, ns); }
+    if (!k) { free(o); return 0; }
+    atomic_fetch_add(&g_lc_loops, nc);
+    if (atomic_fetch_add(&g_lc_mods, 1) == 0) LOG("[vk] shader loops capped at %u trips (spv_loopcap). First: %s, %u loop(s)", cap, what, nc);
+    *out = o; return k;
+}
 // The vertex shader with its outputs started as (0,0,0,1) (spv_vsinit.h), in *out (to free); 0 when it is no vertex shader or has no output to start.
 // On every GPU: an unwritten component is undefined in Vulkan and reads 0 on the Adreno 840 and the Mali-G715, where the hardware gives (0,0,0,1).
 // DM_SPV_VSINIT=0 (env.txt): modules as translated
@@ -3657,6 +3687,20 @@ static void rd_close(void) {   // the pass ended, the scratch copies back in the
     g_rd_nback = 0;
 }
 static uint64_t g_drop[8];   // draws not made, by reason: 0 shader missing, 1 targets, 2 pipeline, 3 descriptors, 4 an invalid binding, 5 pass, 6 vertex buffers
+// DM_VK_SKIP_SHADER=<hash>[,<hash>...] (env.txt, settings.ini skip_shaders): draws whose vertex, fragment or geometry shader is listed are left out, a way
+// around a shader that hangs the GPU (the hang report names each draw's shaders), until it is fixed. The skipped draws are counted in the draw report
+static int skip_shader(vshader *const *sh) {
+    static int n = -1; static char keys[32][17];
+    if (n < 0) { int m = 0; const char *e = getenv("DM_VK_SKIP_SHADER");
+        while (e && *e && m < 32) { while (*e == ',' || *e == ' ' || *e == ';') e++; int j = 0; while (j < 16 && ((e[j] >= '0' && e[j] <= '9') || ((e[j] | 32) >= 'a' && (e[j] | 32) <= 'f'))) { keys[m][j] = e[j] >= 'A' && e[j] <= 'F' ? (char)(e[j] | 32) : e[j]; j++; }
+            keys[m][j] = 0; if (j == 16) m++; e += j; while (*e && *e != ',' && *e != ' ' && *e != ';') e++; }
+        n = m; if (n) LOG("[RED] [vk] DM_VK_SKIP_SHADER: draws of %d listed shader(s) are left out (first %s)", n, keys[0]); }
+    if (!n) return 0;
+    for (int q = 0; q < 4; q++) if (sh[q]) for (int i = 0; i < n; i++) if (!strncmp(sh[q]->key, keys[i], 16)) {
+        static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("[vk] DM_VK_SKIP_SHADER: first draw left out, shader %s", keys[i]);
+        return 1; }
+    return 0;
+}
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_d_init) draw_state_reset();
     if (!D.bst[0]) { RED_ONCE(95, "draw with no vertex program bound"); return 0; }
@@ -3694,6 +3738,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         g_c1d_on = 1; g_pmemo_miss++;
     }
     resolved:;
+    if (skip_shader(k.sh)) { g_drop[7]++; return 0; }   // DM_VK_SKIP_SHADER: a draw of a listed shader left out
     // under rasterizer discard: a transform feedback capture, nothing, or (a stage writes memory) the draw run as a dispatch, its fragment stage dropped and the
     // targets' pass ended before its bindings are made, as vk_dispatch does (an image it writes may be one of the targets)
     int rd = D.rast_discard && rd_draw(k.sh);

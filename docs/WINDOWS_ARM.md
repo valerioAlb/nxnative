@@ -282,6 +282,8 @@ To narrow such a hang down (env.txt):
 | Line | What it does |
 |---|---|
 | `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower |
+| `DM_SPV_LOOP_CAP=<n>` (menu: Shader loop limit) | every shader loop stops after n trips (default on the Adreno: 4096; `0` off). Applied as the shaders load: no new translation |
+| `DM_VK_SKIP_SHADER=<hash>,<hash>` | draws of these shaders (the hang report names them) are left out: a way to keep playing past one that hangs |
 | `DM_VK_MID_DRAWS=8` | GPU submissions of 8 draws, so the hang report names the draw closely (slower) |
 | `DM_OVERLAY_WINDOW=0` | no window over the game at all: no touch controls, F2 menu, FPS or notes |
 | `DM_TOUCH_OVERLAY=off` | the touch controls hidden (F1 brings them back); the menu still works |

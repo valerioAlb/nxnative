@@ -83,7 +83,7 @@ void vk_start_pipe_failed(const char *a, const char *b) {
     atomic_store(&g_dirty, 1);
 }
 void vk_start_lost(VkResult r) {
-    pthread_mutex_lock(&g_mu); snprintf(g_lost, sizeof g_lost, "%s", vk_result_str(r)); pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu); if (strncmp(g_lost, "hang", 4)) snprintf(g_lost, sizeof g_lost, "%s", vk_result_str(r)); pthread_mutex_unlock(&g_mu);   // a hang said first stays: it names the submission
     write_rec();
 }
 void vk_start_hang(const char *what) {

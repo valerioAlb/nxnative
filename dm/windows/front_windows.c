@@ -144,7 +144,13 @@ static void mkdirs(const char *p) {
 }
 static void env_file(const char *dir, const char *name, int over) {
     char path[800]; snprintf(path, sizeof path, "%s/%s", dir, name);
-    FILE *f = fopen(path, "r"); if (!f) return;
+    FILE *f = fopen(path, "r");
+    if (!f && over) {   // env.txt: Explorer hides the extension, so a file made as a text document is env.txt.txt
+        char alt[820]; snprintf(alt, sizeof alt, "%s.txt", path);
+        if ((f = fopen(alt, "r"))) LOG("%s: read from %s (the name has .txt twice: Explorer hides extensions)", name, alt);
+        else LOG("%s: none at %s", name, path);
+    }
+    if (!f) return;
     char line[1024];
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0; char *eq = strchr(line, '=');
@@ -594,7 +600,7 @@ static void stall_note(void) {
 // ---------- Settings (settings.ini, the F2 menu): the ones the host reads at its start go into its environment; the others apply at once ----------
 static const struct { const char *key, *env; } k_env[] = {
     {"fps_target", "DM_FPS_TARGET"}, {"opmode", "DM_OPMODE"}, {"render_scale", "DM_RENDER_SCALE"}, {"async_shaders", "DM_VK_ASYNC_PIPE"}, {"vsync", "DM_VSYNC"},
-    {"vk_robust", "DM_VK_ROBUST"},
+    {"vk_robust", "DM_VK_ROBUST"}, {"spv_loop_cap", "DM_SPV_LOOP_CAP"}, {"skip_shaders", "DM_VK_SKIP_SHADER"},
 };
 static void settings_env(void) {
     for (size_t i = 0; i < sizeof k_env / sizeof k_env[0]; i++) {

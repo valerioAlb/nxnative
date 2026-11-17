@@ -127,6 +127,7 @@ static const mitem k_menu[] = {
     {"touch_overlay", "Touch controls", {"auto", "on", "off"}, {"auto", "on", "off"}, 1, "F1 too"},
     {"touch_opacity", "Touch controls' opacity", {"0.6", "0.8", "0.45", "0.3"}, {"60%", "80%", "45%", "30%"}, 1, NULL},
     {"touch_scale", "Touch controls' size", {"1", "1.2", "0.85"}, {"100%", "120%", "85%"}, 1, NULL},
+    {"spv_loop_cap", "Shader loop limit", {"", "0"}, {"auto", "off"}, 0, "auto: on the Adreno, a shader loop stops after 4096 trips so it cannot hang the GPU"},
     {"vk_robust", "GPU safe reads (robust access)", {"", "1"}, {"off", "on"}, 0, "on: a shader's stray reads give 0; try it if the GPU hangs"},
     {"rumble", "Controller rumble", {"1", "0.5", "0"}, {"on", "weak", "off"}, 1, "Xbox controllers (XInput)"},
 };
