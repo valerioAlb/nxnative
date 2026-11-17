@@ -767,7 +767,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     // a game's defaults built into the host, for a game folder made before its profile's windows_defaults.txt had them (env.txt or defaults.txt still win).
     // Pokémon Pokopia: its 3D scene is composed into a 1920x1080 RGBA8 sRGB image through an image store, which the Adreno X1-45 cannot store to in sRGB: skipped, the
     // world drew black under the UI. DM_VK_STORAGE_UP=2 stores it through its UNORM twin (the texels as written, as Maxwell's stores)
-    static const struct { const char *game, *key, *val; } k_game_env[] = {{"0400A3A01EE4C000", "DM_VK_STORAGE_UP", "2"}};
+    // and robust access: on the Adreno X1-45 its world's draws (vertex 85c01ed67ec089e9, fragment 3fb06ea7d8ed1272) hung the GPU 100-130 s in, without it, in every run
+    // (until Windows reset it, the device lost); with it (and the loop cap) a run went through to frame 5,700. DM_VK_ROBUST=0 (env.txt) or the menu turns it off
+    static const struct { const char *game, *key, *val; } k_game_env[] = {{"0400A3A01EE4C000", "DM_VK_STORAGE_UP", "2"}, {"0400A3A01EE4C000", "DM_VK_ROBUST", "1"}};
     for (size_t i = 0; i < sizeof k_game_env / sizeof k_game_env[0]; i++)
         if (!strcmp(DM_GAME_ID, k_game_env[i].game) && !getenv(k_game_env[i].key)) { setenv(k_game_env[i].key, k_game_env[i].val, 1); LOG("game default: %s=%s", k_game_env[i].key, k_game_env[i].val); }
     settings_env();

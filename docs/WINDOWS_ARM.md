@@ -281,7 +281,7 @@ To narrow such a hang down (env.txt):
 
 | Line | What it does |
 |---|---|
-| `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower |
+| `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower. On by default for Pokémon Pokopia, whose world's draws hung the Adreno X1-45 without it (`DM_VK_ROBUST=0` turns it off) |
 | `DM_SPV_LOOP_CAP=<n>` (menu: Shader loop limit) | every shader loop stops after n trips (default on the Adreno: 4096; `0` off). Applied as the shaders load: no new translation |
 | `DM_VK_STORAGE_UP=2` | an sRGB image a shader stores to is stored through its UNORM twin (the Adreno cannot store sRGB). On by default for Pokémon Pokopia, whose 3D world was black without it |
 | `DM_SPV_DEMOTE=1` | a fragment shader's discard (OpKill) becomes a demote to a helper invocation and a return: an A/B for a driver that mishandles OpKill |
