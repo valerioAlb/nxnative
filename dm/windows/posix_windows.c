@@ -213,7 +213,15 @@ static int anon_protect(region *r, uint8_t *a, uint8_t *b, int prot, int fresh) 
 }
 // The exception handler's part: a touch of a lazy page commits it (with up to 15 lazy pages after it of the same protection: fewer faults for a sequential fill).
 // 1 = committed (resume), 0 = not a lazy page
-static int lazy_commit(const void *addr) {
+static int prot_allows(DWORD p, int acc) {   // acc: the access-violation kind (0 read, 1 write, 8 execute) against a page's Windows protection
+    p &= 0xff;
+    if (acc == 1) return p == PAGE_READWRITE || p == PAGE_WRITECOPY || p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+    if (acc == 8) return p == PAGE_EXECUTE || p == PAGE_EXECUTE_READ || p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+    return p != PAGE_NOACCESS && p != 0;
+}
+// acc as in prot_allows. A fault the page's protection does not allow (a write to a page made read-only on purpose: the dirty tracker's write protection, a
+// read-only key page) is not ours to retry: it goes on to the host's handler, as SIGSEGV does on macOS / Android. Retrying it faulted again at once, for ever
+static int lazy_commit(const void *addr, int acc) {
     int done = 0;
     AcquireSRWLockExclusive(&g_rgl);
     region *r = rg_find(addr);
@@ -225,7 +233,7 @@ static int lazy_commit(const void *addr) {
             else if (VirtualAlloc(r->lo + i * PG, PG, MEM_COMMIT, wprot(m & 7))) { r->pm[i] = (uint8_t)(P_COMMIT | m); atomic_fetch_add(&g_lazy_bytes, PG); done = 1; }
             else done = -1;   // out of commit: the fault goes on to the host's handler
         } else if ((m & P_COMMIT) && (m & 7)) {   // committed by another thread between its fault and this lock: retry the access
-            MEMORY_BASIC_INFORMATION mi; if (VirtualQuery(addr, &mi, sizeof mi) && mi.State == MEM_COMMIT && mi.Protect != PAGE_NOACCESS && (mi.Protect == wprot(m & 7))) done = 1;
+            MEMORY_BASIC_INFORMATION mi; if (VirtualQuery(addr, &mi, sizeof mi) && mi.State == MEM_COMMIT && prot_allows(mi.Protect, acc)) done = 1;
         }
     }
     ReleaseSRWLockExclusive(&g_rgl);
@@ -431,7 +439,7 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     if (!sig || sig == SIGFPE) return EXCEPTION_CONTINUE_SEARCH;
     int av = er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2;
     void *addr = av ? (void *)er->ExceptionInformation[1] : (void *)er->ExceptionAddress;
-    if (av && lazy_commit(addr)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (av && lazy_commit(addr, (int)er->ExceptionInformation[0])) return EXCEPTION_CONTINUE_EXECUTION;
     // Ours: a fault in memory mmap made, or with the pc in the host or in memory it made (guest code). Another (a system DLL probing an address under its own
     // __try) goes on to that DLL's handler; one nobody takes reaches the host's crash handler through the unhandled-exception filter below
     void *pc = (void *)c->Pc;
@@ -439,6 +447,29 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     if (!in_host(pc) && !dm_win_mapped(pc, 4) && !mapped) return EXCEPTION_CONTINUE_SEARCH;
     if (av) code = mapped ? SEGV_ACCERR : SEGV_MAPERR;
     return run_handler(sig, addr, c, esr_of(er), code) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+// Self test of the fault path the dirty tracker (nvn_dirty.c) takes: a write to a page the host made read-only, in a large (lazily committed) anonymous range,
+// reaches the SIGSEGV handler, which makes it writable, and the write goes on. Before the fix, lazy_commit took the fault as its own and retried it for ever
+// (Pokopia on the Surface: a guest thread spinning in the exception handler). On a thread with a time limit, so a regression reports instead of hanging
+static _Atomic int g_wp_hits; static uint8_t *g_wp;
+static void wp_segv(int sig, siginfo_t *si, void *uc) { (void)sig; (void)uc; if ((uint8_t *)si->si_addr >= g_wp && (uint8_t *)si->si_addr < g_wp + PG) { atomic_fetch_add(&g_wp_hits, 1); mprotect(g_wp, PG, PROT_READ | PROT_WRITE); } }
+static DWORD WINAPI wp_body(void *p) {
+    (void)p; volatile uint8_t *q = g_wp; q[0] = 1; q[1] = q[0];   // first touch: lazily committed
+    if (mprotect(g_wp, PG, PROT_READ)) return 1;
+    q[2] = 7; return q[2] == 7 ? 0 : 2;
+}
+static int check_write_protect(void) {
+    size_t n = (size_t)128 << 20;
+    g_wp = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (g_wp == MAP_FAILED) { fprintf(stderr, "[win] write-protect fault check: FAIL (no mapping)\n"); return 0; }
+    struct sigaction sa = {0}, old; sa.sa_sigaction = wp_segv; sa.sa_flags = SA_SIGINFO; dm_win_sigaction(SIGSEGV, &sa, &old);
+    HANDLE t = CreateThread(NULL, 0, wp_body, NULL, 0, NULL); DWORD w = t ? WaitForSingleObject(t, 5000) : WAIT_FAILED, rc = 99;
+    if (w == WAIT_OBJECT_0) GetExitCodeThread(t, &rc);
+    int ok = w == WAIT_OBJECT_0 && rc == 0 && atomic_load(&g_wp_hits) == 1;
+    fprintf(stderr, "[win] write-protect fault check: %s (%s, handler ran %d time(s), 1 expected)\n", ok ? "PASS" : "FAIL", w == WAIT_TIMEOUT ? "still faulting after 5 s" : w == WAIT_OBJECT_0 ? (rc ? "the write did not land" : "the write landed") : "no thread", atomic_load(&g_wp_hits));
+    dm_win_sigaction(SIGSEGV, &old, NULL);
+    if (w == WAIT_OBJECT_0) munmap(g_wp, n);   // else the thread may still be in it
+    if (t) CloseHandle(t);
+    return ok;
 }
 // dmhost_cli.exe with no arguments: <program folder>/selftest main when the self test is there (dmhost.exe runs it too without a game). → 1 with argc/argv set
 int dm_win_default_args(int *argc, char ***argv) {
@@ -456,6 +487,7 @@ int dm_win_default_args(int *argc, char ***argv) {
         snprintf(d, sizeof d, "%s/save", tp); CreateDirectoryW(WPATH(d), NULL); setenv("DM_SAVE", d, 0);
         snprintf(d, sizeof d, "%s/temp", tp); CreateDirectoryW(WPATH(d), NULL); setenv("DM_TEMP", d, 0);
     }
+    check_write_protect();
     av[0] = (*argv)[0]; av[1] = dir; av[2] = "main"; av[3] = NULL; *argv = av; *argc = 3;
     return 1;
 }

@@ -117,6 +117,7 @@ jobs:
           Copy-Item bin/host/dmhost_cli.exe $d; Copy-Item -Recurse bin/selftest "$d/selftest"
           & "$d/dmhost_cli.exe" 2>&1 | Tee-Object -FilePath cli_noargs.log; $rc = $LASTEXITCODE
           if (-not (Select-String -Path cli_noargs.log -Pattern 'selftest: PASS' -Quiet)) { throw "no self test PASS (exit $rc)" }
+          if (-not (Select-String -Path cli_noargs.log -Pattern 'write-protect fault check: PASS' -Quiet)) { throw 'a write to a read-only page (the dirty tracker) did not reach the SIGSEGV handler: posix_windows.c lazy_commit' }
           Remove-Item -Recurse "$d/selftest"
           & "$d/dmhost_cli.exe" 2>&1 | Tee-Object -FilePath cli_usage.log; $rc = $LASTEXITCODE
           if ($rc -ne 2) { throw ('usage exit {0:X8}, not 2' -f $rc) }
