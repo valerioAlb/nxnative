@@ -471,6 +471,7 @@ static void status_draw(void) {
 
 // ---------- The game's picture: its last presented window texture, scaled to fit (aspect kept), on black ----------
 static uint64_t g_shown;
+static int g_nearest, g_show_fps;   // settings: the picture's filter (sharp), the frame-rate note
 static int frame_draw(void) {
     int st = atomic_load(&g_state);
     sc_follow_window();
@@ -490,7 +491,7 @@ static int frame_draw(void) {
     VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{fr.crop[0], fr.crop[1], 0}, {fr.crop[0] + cw, fr.crop[1] + ch, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (fr.flip) { bl.srcOffsets[0].y = fr.crop[1] + ch; bl.srcOffsets[1].y = fr.crop[1]; }
-    vkCmdBlitImage(g_cb, fr.img, VK_IMAGE_LAYOUT_GENERAL, g_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+    vkCmdBlitImage(g_cb, fr.img, VK_IMAGE_LAYOUT_GENERAL, g_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, g_nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
     present_end(idx);
     vkWaitForFences(g_dev, 1, &g_fence, 1, UINT64_MAX);
     g_shown = fr.n; vkb_frame_unlock();
@@ -536,6 +537,7 @@ static void publish(void) {
         if (tilted(g_xi_ax[0][0], g_xi_ax[0][1])) { lx = g_xi_ax[0][0]; ly = g_xi_ax[0][1]; }
         if (tilted(g_xi_ax[0][2], g_xi_ax[0][3])) { rx = g_xi_ax[0][2]; ry = g_xi_ax[0][3]; }
     }
+    if (ovl_menu_open()) { dm_input_set(0, 0, 0, 0, 0); return; }   // the settings menu takes the input
     uint64_t tb; int32_t ta[4]; ovl_input(&tb, ta); b |= tb;   // the touch controls (overlay_windows.c): a tilted touch stick wins too
     if (tilted(ta[0], ta[1])) { lx = ta[0]; ly = ta[1]; }
     if (tilted(ta[2], ta[3])) { rx = ta[2]; ry = ta[3]; }
@@ -568,6 +570,7 @@ static void xinput_poll(void) {
         if (rv != applied[i]) { XINPUT_VIBRATION v = {(WORD)(rv >> 16), (WORD)(rv & 0xffff)}; XInputSetState((DWORD)i, &v); applied[i] = rv; }
     }
     if (now >= next_scan) next_scan = now + 500000000ull;
+    { static uint64_t was; uint64_t b = g_xi_ok[0] ? g_xi_btn[0] : 0; if (ovl_menu_open()) ovl_menu_pad(b & ~was); was = b; }   // the menu moves with the D-pad, A and B
     dm_pad_players(mask);
     publish();
 }
@@ -602,6 +605,44 @@ static void stall_note(void) {
     uint64_t mods = 0, pipes = 0; mtl_create_stats(&mods, &pipes); char t[160];
     snprintf(t, sizeof t, "Still working (%.0f s)  \u00b7  shaders %llu, pipelines %llu", idle, (unsigned long long)mods, (unsigned long long)pipes);
     ovl_badge(t);
+}
+
+// ---------- Settings (settings.ini, the F2 menu): the ones the host reads at its start go into its environment; the others apply at once ----------
+static const struct { const char *key, *env; } k_env[] = {
+    {"fps_target", "DM_FPS_TARGET"}, {"opmode", "DM_OPMODE"}, {"render_scale", "DM_RENDER_SCALE"}, {"async_shaders", "DM_VK_ASYNC_PIPE"}, {"vsync", "DM_VSYNC"},
+};
+static void settings_env(void) {
+    for (size_t i = 0; i < sizeof k_env / sizeof k_env[0]; i++) {
+        const char *k, *v; int found = 0;
+        for (int j = 0; st_each(j, &k, &v); j++) if (!_stricmp(k, k_env[i].key)) { found = 1; if (*v) { setenv(k_env[i].env, v, 1); LOG("settings.ini: %s=%s (%s)", k, v, k_env[i].env); } }
+        (void)found;
+    }
+    const char *f = st_str("filter", "linear"); g_nearest = !_stricmp(f, "nearest");
+    g_show_fps = st_num("show_fps", 0) > 0;
+}
+void front_setting_changed(const char *key) {
+    if (!strcmp(key, "vsync")) { setenv("DM_VSYNC", st_str("vsync", "1"), 1); g_sc_stale = 1; }
+    else if (!strcmp(key, "filter")) g_nearest = !_stricmp(st_str("filter", "linear"), "nearest");
+    else if (!strcmp(key, "show_fps")) { g_show_fps = st_num("show_fps", 0) > 0; if (!g_show_fps) ovl_fps(NULL); }
+}
+static void close_game(void);
+void front_restart(void) {   // the same program and arguments again, told to wait for this one to end (its saves written) before it starts
+    wchar_t exe[MAX_PATH]; if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return;
+    static wchar_t cmd[4096]; swprintf(cmd, 4096, L"%ls --wait-pid %lu", GetCommandLineW(), (unsigned long)GetCurrentProcessId());
+    STARTUPINFOW si = {sizeof si}; PROCESS_INFORMATION pi;
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) { LOG("[RED] restart: CreateProcess failed (%lu)", (unsigned long)GetLastError()); return; }
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    LOG("settings: restarting the game to apply them");
+    close_game();
+}
+static void fps_note(void) {   // frames shown in the last second
+    static uint64_t at, n0, last_n; uint64_t now = dm_win_mono_ns();
+    if (!g_show_fps) return;
+    static uint64_t shown; if (g_shown && g_shown != last_n) { last_n = g_shown; shown++; }
+    if (!at) { at = now; n0 = shown; return; }
+    if (now - at < 1000000000ull) return;
+    char t[48]; snprintf(t, sizeof t, "%.0f fps", (double)(shown - n0) * 1e9 / (double)(now - at)); ovl_fps(t);
+    at = now; n0 = shown;
 }
 
 // ---------- The window ----------
@@ -657,6 +698,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int down = m == WM_KEYDOWN;
         if (down && w == VK_F11) { full_screen(!g_full); return 0; }
         if (down && w == VK_F1) { ovl_toggle(); publish(); return 0; }
+        if (down && w == VK_F2 && !ovl_menu_open()) { g_key_btn = 0; memset(g_key_ax, 0, sizeof g_key_ax); ovl_menu(1); publish(); return 0; }
+        if (ovl_menu_open()) { if (down) ovl_menu_key(w); publish(); return 0; }
         if (down && w == VK_ESCAPE && g_full) { full_screen(0); return 0; }
         if (key_axis_set(w, down)) { if (down) ovl_other_input(); publish(); return 0; }
         uint64_t b = key_button(w);
@@ -701,10 +744,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         snprintf(g_data, sizeof g_data, "%s/nxnative/%s", l8[0] ? l8 : g_dir, DM_GAME_ID); mkdirs(g_data);
     }
     st_load(g_data); g_t0 = dm_win_mono_ns();
+    for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--wait-pid")) {   // a restart from the settings menu: the earlier run ends first
+        HANDLE ph = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)wcstoul(argv[i + 1], NULL, 10)); if (ph) { WaitForSingleObject(ph, 15000); CloseHandle(ph); }
+    }
     log_start(console);
     if (!logged) LOG("[RED] cannot write %s: is the folder read-only? (the log goes to the console only)", lp);
     LOG("nxnative on Windows on Arm: %s (%s), program folder %s, game %s, data %s", DM_GAME_NAME, DM_GAME_ID, g_dir, game_arg ? game_arg : g_game, g_data);
     env_file(g_dir, "env.txt", 1); env_file(game_arg ? game_arg : g_game, "launcher.txt", 0); env_file(game_arg ? game_arg : g_game, "defaults.txt", 0);
+    settings_env();
     vk_driver_dirs(g_dir, g_data);
     vk_driver_game(game_arg ? game_arg : g_game, DM_GAME_ID);
     vk_start_game(g_data);
@@ -735,7 +782,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         }
         xinput_poll();
         if (!frame_draw()) { static uint64_t last; uint64_t now = dm_win_mono_ns(); if (now - last > 33000000ull) { last = now; status_draw(); } }   // the loader, 30 times a second
-        stall_note();
+        stall_note(); fps_note();
+        { static double at = -1; if (at < 0) { const char *e = getenv("DM_OPEN_MENU_AFTER"); at = e ? atof(e) : 0; }   // CI: the menu's picture
+          if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = 0; ovl_menu(1); } }
         ovl_follow();
         vk_start_tick();
     }

@@ -7,6 +7,7 @@
 #include "touchpad.h"
 #include "dm.h"
 #include "front.h"
+#include "dm_input.h"
 #include <windowsx.h>
 #include <stdatomic.h>
 #include <math.h>
@@ -62,6 +63,7 @@ static LRESULT CALLBACK ov_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     return DefWindowProcW(h, m, w, l);
 }
+void ovl_reload(void) { int vis = g_visible; load_layout(); g_visible = g_mode == 1 ? 1 : g_mode == 2 ? 0 : vis; g_pad.dirty = 1; }
 void ovl_init(HWND owner) {
     g_owner = owner; load_layout();
     int touch = GetSystemMetrics(SM_MAXIMUMTOUCHES) > 0;
@@ -103,10 +105,116 @@ static void text_at(const char *s, int cx, int cy, int size, float a, int left) 
     }
     SelectObject(g_tdc, o); DeleteObject(f);
 }
+// ---- the settings menu ----
+// A setting: its settings.ini key, the label, its values (the first: what a fresh install has; "" leaves the key unset, so the game's profile decides) and their names.
+// live: applied at once; the others when the game starts again ("Restart" in the menu)
+typedef struct { const char *key, *label, *vals[6], *names[6]; int live; const char *note; } mitem;
+static const mitem k_menu[] = {
+    {"vsync", "V-sync", {"1", "0"}, {"on", "off"}, 1, "off: frames as fast as the GPU goes, may tear"},
+    {"fps_target", "Frame limit", {"", "30", "60", "0"}, {"game profile", "30 fps", "60 fps", "game's own"}, 0, "30 fps: steadier and cooler on a Surface"},
+    {"opmode", "Console mode", {"", "1", "0"}, {"game profile", "docked (TV)", "handheld"}, 0, "handheld: most games render fewer pixels, faster"},
+    {"render_scale", "Render scale", {"", "0.75", "0.5"}, {"100%", "75%", "50%"}, 0, "only games with a render-scale patch (see the log)"},
+    {"async_shaders", "Shaders in the background", {"", "0"}, {"on", "off"}, 0, "on: fewer stutters, an object may show a moment late"},
+    {"filter", "Picture filter", {"linear", "nearest"}, {"smooth", "sharp"}, 1, NULL},
+    {"show_fps", "Show FPS", {"0", "1"}, {"off", "on"}, 1, NULL},
+    {"touch_overlay", "Touch controls", {"auto", "on", "off"}, {"auto", "on", "off"}, 1, "F1 too"},
+    {"touch_opacity", "Touch controls' opacity", {"0.6", "0.8", "0.45", "0.3"}, {"60%", "80%", "45%", "30%"}, 1, NULL},
+    {"touch_scale", "Touch controls' size", {"1", "1.2", "0.85"}, {"100%", "120%", "85%"}, 1, NULL},
+};
+enum { NM = sizeof k_menu / sizeof k_menu[0], M_RESTART = NM, M_CLOSE = NM + 1, M_ROWS = NM + 2 };
+static int g_menu, g_sel, g_restart_due;
+static char g_fps[48];
+static int cur_val(int i) {
+    const char *v = st_get(k_menu[i].key); if (!v) v = "";
+    for (int k = 0; k < 6 && k_menu[i].vals[k]; k++) if (!strcmp(v, k_menu[i].vals[k])) return k;
+    for (int k = 0; k < 6 && k_menu[i].vals[k]; k++) if (k_menu[i].vals[k][0] && strtod(v, NULL) == strtod(k_menu[i].vals[k], NULL) && *v) return k;
+    return 0;
+}
+static int nvals(int i) { int k = 0; while (k < 6 && k_menu[i].vals[k]) k++; return k; }
+static void menu_change(int i, int dir) {
+    if (i >= NM) return;
+    int n = nvals(i), k = (cur_val(i) + dir + n) % n;
+    st_put(k_menu[i].key, k_menu[i].vals[k]);
+    if (!k_menu[i].live) g_restart_due = 1;
+    LOG("settings: %s = %s (%s)%s", k_menu[i].key, k_menu[i].vals[k][0] ? k_menu[i].vals[k] : "(unset)", k_menu[i].names[k], k_menu[i].live ? "" : ", at the next start");
+    if (!strncmp(k_menu[i].key, "touch_", 6)) ovl_reload();
+    front_setting_changed(k_menu[i].key);
+    g_pad.dirty = 1;
+}
+static void menu_activate(int i) {
+    if (i == M_CLOSE) { ovl_menu(0); return; }
+    if (i == M_RESTART) { if (g_restart_due) front_restart(); return; }
+    menu_change(i, 1);
+}
+void ovl_menu(int open) { if (g_menu != open) { g_menu = open; g_pad.dirty = 1; tp_release_all(&g_pad); LOG("settings menu %s", open ? "open (F2 / Esc closes)" : "closed"); } }
+int ovl_menu_open(void) { return g_menu; }
+int ovl_menu_key(WPARAM vk) {
+    if (!g_menu) return 0;
+    switch (vk) {
+    case VK_UP: g_sel = (g_sel + M_ROWS - 1) % M_ROWS; break;
+    case VK_DOWN: g_sel = (g_sel + 1) % M_ROWS; break;
+    case VK_LEFT: menu_change(g_sel, -1); break;
+    case VK_RIGHT: menu_change(g_sel, 1); break;
+    case VK_RETURN: case VK_SPACE: menu_activate(g_sel); break;
+    case VK_ESCAPE: case VK_F2: case VK_BACK: ovl_menu(0); break;
+    default: return 1;   // every other key stays out of the game while the menu is open
+    }
+    g_pad.dirty = 1; return 1;
+}
+void ovl_menu_pad(uint64_t p) {
+    if (!g_menu || !p) return;
+    if (p & DM_BTN_UP) ovl_menu_key(VK_UP);
+    if (p & DM_BTN_DOWN) ovl_menu_key(VK_DOWN);
+    if (p & DM_BTN_LEFT) ovl_menu_key(VK_LEFT);
+    if (p & DM_BTN_RIGHT) ovl_menu_key(VK_RIGHT);
+    if (p & DM_BTN_A) ovl_menu_key(VK_RETURN);
+    if (p & (DM_BTN_B | DM_BTN_PLUS)) ovl_menu(0);
+}
+void ovl_fps(const char *t) { if (!t) { if (g_fps[0]) { g_fps[0] = 0; g_pad.dirty = 1; } return; } if (strcmp(t, g_fps)) { snprintf(g_fps, sizeof g_fps, "%s", t); g_pad.dirty = 1; } }
+// The panel's geometry: u (a unit), its rectangle and row height
+static void menu_geom(float *u, float *x0, float *y0, float *w, float *rh) {
+    float s = (float)(g_bw < g_bh ? g_bw : g_bh); *u = s / 30; *rh = *u * 1.55f;
+    *w = *u * 30; if (*w > (float)g_bw * 0.94f) *w = (float)g_bw * 0.94f;
+    float h = *rh * (M_ROWS + 2.2f); *x0 = ((float)g_bw - *w) / 2; *y0 = ((float)g_bh - h) / 2; if (*y0 < 0) *y0 = 0;
+}
+static int menu_row_at(float px, float py, int *side) {
+    float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh);
+    if (px < x0 || px > x0 + w) return -2;
+    int r = (int)floorf((py - (y0 + rh * 1.6f)) / rh);
+    if (py < y0 || r >= M_ROWS) return py < y0 || py > y0 + rh * (M_ROWS + 2.2f) ? -2 : -1;
+    if (r < 0) return -1;
+    *side = px < x0 + w * 0.62f ? 0 : px < x0 + w * 0.77f ? -1 : 1; return r;
+}
+static void menu_draw(void) {
+    float u, x0, y0, w, rh; menu_geom(&u, &x0, &y0, &w, &rh);
+    tp_rect(g_px, g_bw, g_bh, 0, 0, (float)g_bw, (float)g_bh, 0, 0x000000, 0.45f);
+    tp_rect(g_px, g_bw, g_bh, x0, y0, x0 + w, y0 + rh * (M_ROWS + 2.2f), u * 0.8f, 0x14181E, 0.94f);
+    text_at("Settings", (int)(x0 + u), (int)(y0 + rh * 0.8f), (int)(u * 1.05f), 1, 1);
+    text_at("F2 / Esc / B closes", (int)(x0 + w - u * 9), (int)(y0 + rh * 0.8f), (int)(u * 0.55f), 0.55f, 1);
+    for (int r = 0; r < M_ROWS; r++) {
+        float ry = y0 + rh * (1.6f + r), cy = ry + rh / 2;
+        if (r == g_sel) tp_rect(g_px, g_bw, g_bh, x0 + u * 0.4f, ry + 2, x0 + w - u * 0.4f, ry + rh - 2, u * 0.4f, 0x2E6EA6, 0.85f);
+        if (r < NM) {
+            int k = cur_val(r);
+            text_at(k_menu[r].label, (int)(x0 + u), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+            char v[64]; snprintf(v, sizeof v, "\u2039  %s  \u203a%s", k_menu[r].names[k], k_menu[r].live ? "" : " *");
+            text_at(v, (int)(x0 + w * 0.62f), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+        } else if (r == M_RESTART) {
+            text_at(g_restart_due ? "Restart the game now to apply *" : "* applies at the next start", (int)(x0 + u), (int)cy, (int)(u * 0.72f), g_restart_due ? 1.0f : 0.5f, 1);
+        } else text_at("Close", (int)(x0 + u), (int)cy, (int)(u * 0.72f), 0.95f, 1);
+    }
+    if (g_sel < NM && k_menu[g_sel].note) text_at(k_menu[g_sel].note, (int)(x0 + u), (int)(y0 + rh * (M_ROWS + 1.75f)), (int)(u * 0.55f), 0.65f, 1);
+}
 static void draw(void) {
     buffers(g_w, g_h); if (!g_px) return;
     memset(g_px, 0, (size_t)g_bw * g_bh * 4);
-    if (g_visible) {
+    if (g_fps[0]) {
+        int u = (g_bw < g_bh ? g_bw : g_bh) / 40; if (u < 10) u = 10;
+        tp_rect(g_px, g_bw, g_bh, (float)u * 0.5f, (float)u * 0.5f, (float)u * 7.5f, (float)u * 2.1f, (float)u * 0.5f, 0x000000, 0.55f);
+        text_at(g_fps, u, (int)((float)u * 1.3f), u, 0.95f, 1);
+    }
+    if (g_menu) menu_draw();
+    else if (g_visible) {
         tp_render(&g_pad, g_px, g_bw, g_bh);
         for (int i = 0; i < g_pad.n; i++) if (g_pad.c[i].r > 0 && g_pad.c[i].label[0]) { int cx, cy, sz; tp_label_box(&g_pad, i, g_bw, g_bh, &cx, &cy, &sz); text_at(g_pad.c[i].label, cx, cy, sz, 0.9f * g_pad.opacity, 0); }
     }
@@ -129,7 +237,7 @@ static void draw(void) {
 void ovl_follow(void) {
     if (!g_ov) return;
     RECT r; POINT o = {0, 0};
-    int want = (g_visible || g_badge_on) && IsWindowVisible(g_owner) && !IsIconic(g_owner) && GetClientRect(g_owner, &r) && ClientToScreen(g_owner, &o);
+    int want = (g_visible || g_badge_on || g_menu || g_fps[0]) && IsWindowVisible(g_owner) && !IsIconic(g_owner) && GetClientRect(g_owner, &r) && ClientToScreen(g_owner, &o);
     if (!want) { if (g_shown) { ShowWindow(g_ov, SW_HIDE); g_shown = 0; } return; }
     int w = r.right - r.left, h = r.bottom - r.top; if (w <= 0 || h <= 0) return;
     int moved = w != g_w || h != g_h || o.x != g_x || o.y != g_y;
@@ -149,7 +257,7 @@ void ovl_toggle(void) {
     st_put("touch_overlay", g_mode == 1 ? "on" : g_mode == 2 ? "off" : "auto");
     LOG("touch controls %s (F1; settings.ini touch_overlay=%s)", on ? "shown" : "hidden", g_mode == 1 ? "on" : g_mode == 2 ? "off" : "auto");
 }
-void ovl_input(uint64_t *b, int32_t ax[4]) { *b = g_visible ? g_pad.btn : 0; for (int i = 0; i < 4; i++) ax[i] = g_visible ? g_pad.ax[i] : 0; }
+void ovl_input(uint64_t *b, int32_t ax[4]) { int on = g_visible && !g_menu; *b = on ? g_pad.btn : 0; for (int i = 0; i < 4; i++) ax[i] = on ? g_pad.ax[i] : 0; }
 void ovl_picture(const int pic[4]) { memcpy(g_pic, pic, sizeof g_pic); }
 void ovl_badge(const char *text) {
     int on = text != NULL;
@@ -159,11 +267,17 @@ void ovl_badge(const char *text) {
 // A finger (or the mouse, pid MOUSE) down / moved / up at a client point
 enum { MOUSE = 0xFFFF0000u };
 static void ptr_down(uint32_t pid, float x, float y, int is_touch) {
+    if (g_menu) {   // a tap on a row: the left part changes it forward, the arrows' halves back / forward; outside the panel closes it
+        int side = 0, r = menu_row_at(x, y, &side);
+        if (r == -2) ovl_menu(0);
+        else if (r >= 0) { g_sel = r; if (r < NM) menu_change(r, side < 0 ? -1 : 1); else menu_activate(r); }
+        g_pad.dirty = 1; return;
+    }
     if (is_touch && g_mode == 0) show(1);
     if (g_visible && tp_down(&g_pad, pid, x, y, g_w ? g_w : 1, g_h ? g_h : 1)) return;
     gt_down(pid, x, y);
 }
-static void ptr_move(uint32_t pid, float x, float y) { if (!tp_move(&g_pad, pid, x, y, g_w ? g_w : 1, g_h ? g_h : 1)) gt_move(pid, x, y); }
+static void ptr_move(uint32_t pid, float x, float y) { if (g_menu) return; if (!tp_move(&g_pad, pid, x, y, g_w ? g_w : 1, g_h ? g_h : 1)) gt_move(pid, x, y); }
 static void ptr_up(uint32_t pid) { if (!tp_up(&g_pad, pid)) gt_up(pid); }
 int ovl_wndproc(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
     *res = 0;

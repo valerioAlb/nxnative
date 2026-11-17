@@ -22,3 +22,14 @@ void ovl_other_input(void);                              // a key or the control
 void ovl_toggle(void);                                   // F1
 void ovl_picture(const int pic[4]);                      // the game picture's rectangle in the window, for the game's touch screen
 void ovl_badge(const char *text);                        // a small "still working" note at the top with a spinner (NULL: none)
+
+// The settings menu (F2; overlay_windows.c): touch, mouse, keyboard (arrows, Enter, Esc) and the controller (D-pad, A, B) move in it; the game gets no input meanwhile
+void ovl_menu(int open);                 // open / close
+int ovl_menu_open(void);
+int ovl_menu_key(WPARAM vk);             // a key while open → 1 when taken
+void ovl_menu_pad(uint64_t pressed);     // buttons pressed (DM_BTN_*) since the last call, while open
+void ovl_fps(const char *text);          // the frame-rate note at the top left (NULL: none)
+void ovl_reload(void);                   // the touch settings changed
+// front_windows.c: a setting the menu changed (applied at once when it can be), and the restart the menu asks for
+void front_setting_changed(const char *key);
+void front_restart(void);

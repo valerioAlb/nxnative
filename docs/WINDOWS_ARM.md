@@ -182,6 +182,7 @@ Controls:
 | + / − | Enter / Backspace |
 | Touch | the mouse, or the touch screen where no control is |
 | Touch controls on / off | F1 |
+| Settings menu | F2 |
 | Full screen | F11 or Alt+Enter |
 
 ### Touch controls and settings
@@ -201,6 +202,25 @@ itself, and each key can also be given in `env.txt` as `DM_<KEY>`, for example `
 | `touch_scale` | 0.5 to 2 | 1 |
 | `touch.<control>` | `x,y[,r]`: units of the window's shorter side, negative counts from the right or bottom edge; `r` 0 hides it. Controls: `lstick rstick dpad a b x y l r zl zr plus minus ls rs` | built-in layout |
 | `stall_note` | seconds without a new frame before the "Still working" note shows (0: never) | 3 |
+
+### Graphics and the settings menu (F2)
+
+F2 opens the settings menu over the game. Touch, the mouse, the arrow keys with Enter, or the controller's D-pad with A all work
+in it; Esc, F2 or B closes it. The game gets no input while it is open. Settings marked `*` apply at the next start, and the
+menu's "Restart the game now" entry restarts the game for you, once the old run has ended and saved.
+
+| Key | Values | Applies | Effect |
+|---|---|---|---|
+| `vsync` | `1`, `0` | at once | `0`: frames as fast as the GPU goes (mailbox / immediate), may tear |
+| `fps_target` | unset (the game's profile), `30`, `60`, `0` (the game's own limit) | next start | frame cap (`DM_FPS_TARGET`) |
+| `opmode` | unset, `1` docked, `0` handheld | next start | handheld: most Switch 2 games render at the lower handheld resolution, which is the biggest speed-up (`DM_OPMODE`) |
+| `render_scale` | unset, `0.75`, `0.5` | next start | only games whose build has a render-scale patch (`DM_RENDER_SCALE`) |
+| `async_shaders` | unset (on), `0` | next start | pipelines built in the background, so fewer stutters (`DM_VK_ASYNC_PIPE`) |
+| `filter` | `linear`, `nearest` | at once | the picture's scaling to the window: smooth or sharp |
+| `show_fps` | `0`, `1` | at once | frames shown per second, at the top left |
+
+The NVN replay has no general internal-resolution scale, so a 1.5x upscale isn't offered. The handheld mode is the resolution
+setting that works for every game.
 
 Example: `touch.a=-0.12,-0.6,0.07` makes A bigger, and `touch.ls=0,0,0` hides the stick click.
 

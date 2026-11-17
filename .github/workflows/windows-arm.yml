@@ -93,14 +93,27 @@ jobs:
           DM_NO_FATAL_BOX: '1'   # no message box waiting for a click on a fatal error
           DM_TOUCH_OVERLAY: 'on'  # the touch controls' layered window made and drawn (settings.ini touch_overlay; no touch screen on the runner)
           DM_WIN_WATCH: '8'      # the watchdog's thread dump, checked below (the self test's window idles after its PASS)
+          DM_OPEN_MENU_AFTER: '8'  # the settings menu opens by itself after 8 s, for its picture
         run: |
+          function Shot($name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $bmp.Save("$PWD/$name"); $g.Dispose(); $bmp.Dispose()
+              Write-Host "picture: $name ($($b.Width)x$($b.Height))"
+            } catch { Write-Host "no picture of the screen: $_" }
+          }
           $fail = @()
           foreach ($case in 'selftest', 'game') {
             $d = "$env:RUNNER_TEMP/gui_$case"; New-Item -ItemType Directory -Force $d | Out-Null
             Copy-Item bin/host/dmhost.exe $d; Copy-Item -Recurse bin/selftest "$d/selftest"
             if ($case -eq 'game') { New-Item -ItemType Directory -Force "$d/game" | Out-Null; Copy-Item -Recurse bin/selftest "$d/game/code"; Copy-Item bin/selftest/main.fixups.tsv "$d/game/code/main.fixups.tsv" -ErrorAction SilentlyContinue }
             $p = Start-Process -FilePath "$d/dmhost.exe" -WorkingDirectory $d -PassThru
-            $done = $p.WaitForExit(25000)
+            if ($case -eq 'selftest') {   # pictures of the window: the touch controls at 5 s, the settings menu (DM_OPEN_MENU_AFTER) at 12 s
+              $done = $p.WaitForExit(5000); if (-not $done) { Shot "shot_controls.png" }
+              if (-not $done) { $done = $p.WaitForExit(7000); if (-not $done) { Shot "shot_menu.png" } }
+              if (-not $done) { $done = $p.WaitForExit(13000) }
+            } else { $done = $p.WaitForExit(25000) }
             if (-not $done) { $p.Kill(); $p.WaitForExit(); $how = 'still running after 25 s (killed)' } else { $how = 'exited with {0:X8}' -f $p.ExitCode }
             Write-Host "== $case : $how"
             Get-ChildItem $d | Select-Object Name, Length | Format-Table | Out-String | Write-Host
@@ -133,6 +146,7 @@ jobs:
           path: |
             selftest.log
             cli_*.log
+            shot_*.png
             gui_*.log
             gui_*.crash.txt
           if-no-files-found: ignore
