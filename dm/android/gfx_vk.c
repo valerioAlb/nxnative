@@ -403,7 +403,8 @@ typedef struct chunk {
     VkResult sub_r;   // VK_SUCCESS once its fence is on the queue; else what the queue said, and the completion thread doesn't wait on the fence (submit_or_fence)
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
     gm_logref *gml; int ngml, cgml, gm_st, ip_wr;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc); ip_wr: one wrote a storage buffer in place
-    struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
+    struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;
+    char (*crd)[160];   // a draw's details beside its crumb (crumb_detail: draws of a DM_VK_SPLIT_SHADER shader, or every draw with DM_VK_CRUMB_DETAIL=1), CR_MAX of them once one is kept   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
 } chunk;
 // Chunks in use (g_nchunk of NCHUNK_MAX): the one being recorded and those submitted, until the completion thread is done with them. With none free, cur() waits for the
 // oldest (the wait is in the GPU busy line: g_chunk_wait_ns). A submission is cut every 48-64 draws (EARLY_DRAWS, MID_DRAWS), so a game sends many a frame, and with four
@@ -419,6 +420,7 @@ static chunk *g_fifo[NCHUNK_MAX]; static int g_fifo_n;   // submitted, oldest fi
 static void crumb(char kind, const char *a, const char *b, uint32_t n, uint32_t m) {
     if (!C) return;
     chunk *c = C; int i = c->ncr++ % CR_MAX; c->cr[i].kind = kind; c->cr[i].a = a; c->cr[i].b = b; c->cr[i].n = n; c->cr[i].m = m;
+    if (c->crd) c->crd[i][0] = 0;
 }
 // a copy, upload, blit or clear recorded into the current chunk's command buffer (the rec_ wrappers, under g_bk as every vkCmd* of the replay): named in the hang
 // report beside the passes and draws, so a submission the GPU stalled in that holds transfers says so ('u' buffer to image, 'r' image to buffer, 'k' image copy,
@@ -776,7 +778,7 @@ static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     for (int k = 0; k < n;) {   // a run of the same crumb (Breath of the Wild's chunks hold runs of 17 alike draws) is one line, "× run"
         int i = (c->ncr - n + k) % CR_MAX, run = 1; char kd = c->cr[i].kind; int at = c->ncr - n + k;
         while (k + run < n) { int j = (c->ncr - n + k + run) % CR_MAX;
-            if (c->cr[j].kind != kd || c->cr[j].a != c->cr[i].a || c->cr[j].b != c->cr[i].b || c->cr[j].n != c->cr[i].n || c->cr[j].m != c->cr[i].m) break;
+            if (c->cr[j].kind != kd || c->cr[j].a != c->cr[i].a || c->cr[j].b != c->cr[i].b || c->cr[j].n != c->cr[i].n || c->cr[j].m != c->cr[i].m || (c->crd && (c->crd[i][0] || c->crd[j][0]))) break;
             run++; }
         char x[24] = ""; if (run > 1) snprintf(x, sizeof x, " (x %d, to %d)", run, at + run - 1);
         if (kd == 'p') LOG("[vk]   %d: pass %u x %u%s", at, c->cr[i].n, c->cr[i].m, x);
@@ -784,6 +786,7 @@ static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
         else if (strchr("urkbxlL", kd)) { static const char *const nm[] = {"upload (buffer to image)", "read-back (image to buffer)", "image copy", "blit", "buffer copy", "colour clear", "depth / stencil clear"};
             LOG("[vk]   %d: %s %u x %u%s", at, nm[strchr("urkbxlL", kd) - "urkbxlL"], c->cr[i].n, c->cr[i].m, x); }
         else LOG("[vk]   %d: %sdraw, vertex %s fragment %s, %u vertices x %u instances%s", at, kd == 'D' ? "indirect " : "", c->cr[i].a, c->cr[i].b ? c->cr[i].b : "-", c->cr[i].n, c->cr[i].m, x);
+        if (c->crd && c->crd[i][0]) LOG("[vk]      %s", c->crd[i]);
         k += run; }
 }
 static void rb_record(chunk *c), rb_invalidate(chunk *c);   // gfx_vk_readback.inc

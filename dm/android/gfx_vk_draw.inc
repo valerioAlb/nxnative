@@ -2980,6 +2980,7 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // The set of shader s's stage for the draw being made into *pset, and the offsets of its dynamic uniform buffers into dyn (s->ndyn of them, by binding): a set written with
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
+static void dtex_note(const vshader *s, const vtex *v);   // below vk_draw_'s helpers
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
     int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
@@ -3143,6 +3144,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
                                   vv && vv->set_layers ? vv->nlayers : 0, tex_aspect(v, rg, vv, s), has_swz ? swz : NULL);
                     g_view_fmt = VK_FORMAT_UNDEFINED;
                     if (s->upsq && !g_upsq_src) { g_upsq_src = v; g_upsq_src_iv = iv; } }   // a listed upscaler's input (gfx_vk_upsq.inc)
+                if (v && s->stage != SH_CS) dtex_note(s, v);   // feedback loops; crumb_detail
             }
             if (!iv) iv = ms ? dummy_ms((t->type & 0x400) != 0) : dummy_view(vt);
             if (!iv) { g_bind_bad = 1; RED_ONCE(113, "no stand-in for an unbound multisample slot on this GPU: skipped"); iv = dummy_view(vt); }
@@ -3749,6 +3751,19 @@ static void split_note(vshader *const *sh) {   // after a draw is recorded into 
     g_split_cnt++;
 }
 static int split_due(void) { if (C && g_split_n > 0 && g_split_seq == C->seq && g_split_cnt >= g_split_every) { g_split_cnt = 0; if (!g_split_flushes++) LOG("[vk] DM_VK_SPLIT_SHADER: first chunk sent after %d draws of a listed shader", g_split_every); return 1; } return 0; }
+// The textures a draw's stages sample, as stage_set resolved them (for crumb_detail), and draws that sample an attachment of the pass they draw in (a feedback loop:
+// undefined in Vulkan without VK_EXT_attachment_feedback_loop_layout, and a tiler such as the Adreno holds the attachment in its tile memory while the texture unit reads
+// the image's memory). Said for the first 16 shader / texture pairs; counted in g_fbl
+static struct { uint64_t ser; uint32_t w, h; int fmt, att; } g_dtex[8]; static int g_ndtex; static uint64_t g_fbl;
+static void dtex_note(const vshader *s, const vtex *v) {
+    int att = -1; if (P.dv && P.dv->img == v->img) att = 8; for (int i = 0; i < 8; i++) if (P.cv[i] && P.cv[i]->img == v->img) att = i;
+    if (g_ndtex < 8) g_dtex[g_ndtex++] = (typeof(g_dtex[0])){v->serial, v->w, v->h, (int)v->fmt, att};
+    if (att >= 0) { g_fbl++; static int nsaid; static const vshader *said[16]; static uint64_t said_ser[16]; int k = 0; while (k < nsaid && !(said[k] == s && said_ser[k] == v->serial)) k++;
+        if (k == nsaid && nsaid < 16) { said[nsaid] = s; said_ser[nsaid++] = v->serial;
+            LOG("[RED] [vk] feedback loop: shader %s samples texture s%llu %ux%u format %d, which is %s%.0d of the pass it draws in (%ux%u)", s->key, (unsigned long long)v->serial, v->w, v->h, (int)v->fmt,
+                att == 8 ? "the depth / stencil attachment" : "colour attachment ", att == 8 ? 0 : att, P.w, P.h); } }
+}
+static int crumb_detail_on(vshader *const *sh) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CRUMB_DETAIL"); v = e && *e == '1'; } return v || split_hit(sh); }
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_d_init) draw_state_reset();
     if (!D.bst[0]) { RED_ONCE(95, "draw with no vertex program bound"); return 0; }
@@ -3809,6 +3824,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         int i = 0; g_bind_bad = 0;
         if (!cur()) { g_drop[3]++; return 0; }
         uint64_t dseq = C->seq;   // the chunk the sets come from (one: only a sync inside stage_set closes a chunk, and that stage_set then fails)
+        g_ndtex = 0;
         for (; i < 4; i++) if (k.sh[i] && !stage_set(k.sh[i], 0, &sets[i], dyn[i], pprog[i], pst[i], base_inst, dseq)) break;
         if (i == 4) break;
         if (!ds_moved(dseq) || ds_again(t, 0)) { g_drop[3]++; return 0; }
@@ -3891,6 +3907,17 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         vs_layer_groups(c, pp, ib ? icount : count, inst, ib ? (int32_t)((di ? di->base_vertex : 0) - lo) : (int32_t)(dw->first - lo), base_inst - inst_shift(base_inst), ib != VK_NULL_HANDLE);
     g_draws++; C->ndraw++; crumb((dw ? dw->ind : di->ind) ? 'D' : 'd', k.sh[0]->key, k.sh[1] ? k.sh[1]->key : NULL, ib ? icount : count, inst);
     split_note(k.sh);   // DM_VK_SPLIT_SHADER
+    if (crumb_detail_on(k.sh)) {   // what this draw read, beside its crumb: the hang report names it
+        if (!C->crd) C->crd = calloc(CR_MAX, sizeof *C->crd);
+        if (C->crd) { char *o = C->crd[(C->ncr - 1) % CR_MAX]; size_t n = 160, l = 0;
+            #define AP(...) do { if (l < n) { int k_ = snprintf(o + l, n - l, __VA_ARGS__); if (k_ > 0) l += (size_t)k_; } } while (0)
+            if (ib) AP("idx %s%u base %d range %lld-%lld", i32 ? "32:" : "16:", icount, di ? di->base_vertex : 0, (long long)vlo, (long long)vhi); else AP("first %d", dw->first);
+            AP(" vb0 %lluB s%u", (unsigned long long)D.vbuf[0].size, D.stream[0].stride);
+            for (int q = 0; q < g_ndtex; q++) AP(" t s%llu %ux%u f%d%s", (unsigned long long)g_dtex[q].ser, g_dtex[q].w, g_dtex[q].h, g_dtex[q].fmt, g_dtex[q].att >= 0 ? "!FB" : "");
+            AP(" rt"); for (int q = 0; q < 8; q++) if (P.cv[q]) AP(" s%llu", (unsigned long long)P.cv[q]->serial);
+            if (P.dv) AP(" z s%llu", (unsigned long long)P.dv->serial);
+            #undef AP
+        } }
     if (g_prof_cur >= 0) { prof_rec *pr = &g_prof[g_prof_cur]; uint64_t nv = (uint64_t)(ib ? icount : count) * inst; pr->draws++; pr->verts += nv;
         if (nv > pr->big) { pr->big = nv; pr->bigvs = k.sh[0]->key; pr->bigfs = k.sh[1] ? k.sh[1]->key : NULL; } }
     if (dump_on()) {
