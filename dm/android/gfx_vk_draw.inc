@@ -1355,6 +1355,9 @@ static VkRenderPass rp_get(const rp_key *k) {
 static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
                 uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
 static uint64_t g_passes;
+static uint32_t g_p_dlv, g_p_dly;   // the depth target's level and first layer in the pass (P.dv)
+// what the pass's draws and clears have written since it was begun (rp_start): colour slots (bit i) and the depth / stencil target, for fb_split (dtex_note)
+static uint8_t g_pw_c, g_pw_ds, g_fb_due; static uint64_t g_fbl_split, g_fbl_self, g_fbl_mip;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
 // $DM_DUMP_DIR/f<frame>_p<pass>_a<attachment>_<w>x<h>_vk<format>_s<serial>.raw once the frame is presented, with a log line per draw (shaders, viewport, textures)
 typedef struct { stg_t s; uint32_t w, h; VkFormat f; int pass, att; uint64_t ser; } dump_t;   // att < 0: a texture the pass's draws read
@@ -1719,7 +1722,7 @@ static int rp_prepare_(int layered) {
             uint32_t nl = layered ? rt_layers(v, dv, lv, ly) : 1;
             g_view_slice = 1; VkImageView iv = view_get(v, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, lv, 1, ly, nl, v->aspect, NULL); g_view_slice = 0;
             if (iv && nl < layers) layers = nl;
-            if (iv) { k.depth = v->fmt; k.samples = v->samples; dvw = iv; nv++; P.dv = v; rt_note(v); uint32_t lw = v->w >> lv ? v->w >> lv : 1, lh = v->h >> lv ? v->h >> lv : 1; if (lw < w) w = lw; if (lh < h) h = lh; }
+            if (iv) { k.depth = v->fmt; k.samples = v->samples; dvw = iv; nv++; P.dv = v; g_p_dlv = lv; g_p_dly = ly; rt_note(v); uint32_t lw = v->w >> lv ? v->w >> lv : 1, lh = v->h >> lv ? v->h >> lv : 1; if (lw < w) w = lw; if (lh < h) h = lh; }
         }
     }
     if (!nv || w == UINT32_MAX) { RED_ONCE(84, "render targets without an image"); lsnap_drop_all(); return 0; }
@@ -1759,7 +1762,7 @@ static int rp_start(void) {
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
     copied_depth_pass(c);   // a depth target a copy wrote: a draw Qualcomm's driver needs first (gfx_vk_dscopy.inc)
-    P.active = 1; g_passes++;
+    P.active = 1; g_passes++; g_pw_c = 0; g_pw_ds = 0;
     return 1;
 }
 // a completed chunk's draw resources (the completion thread, after its fence, before busy = 0): arena blocks kept for reuse, texel buffer views destroyed, and its descriptor
@@ -2980,7 +2983,7 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // The set of shader s's stage for the draw being made into *pset, and the offsets of its dynamic uniform buffers into dyn (s->ndyn of them, by binding): a set written with
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
-static void dtex_note(const vshader *s, const vtex *v);   // below vk_draw_'s helpers
+static void dtex_note(const vshader *s, const vtex *v, const view_t *vv);   // below vk_draw_'s helpers
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
     int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
@@ -3144,7 +3147,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
                                   vv && vv->set_layers ? vv->nlayers : 0, tex_aspect(v, rg, vv, s), has_swz ? swz : NULL);
                     g_view_fmt = VK_FORMAT_UNDEFINED;
                     if (s->upsq && !g_upsq_src) { g_upsq_src = v; g_upsq_src_iv = iv; } }   // a listed upscaler's input (gfx_vk_upsq.inc)
-                if (v && s->stage != SH_CS) dtex_note(s, v);   // feedback loops; crumb_detail
+                if (v && s->stage != SH_CS) dtex_note(s, v, rg->has_v ? &rg->v : NULL);   // feedback loops; crumb_detail
             }
             if (!iv) iv = ms ? dummy_ms((t->type & 0x400) != 0) : dummy_view(vt);
             if (!iv) { g_bind_bad = 1; RED_ONCE(113, "no stand-in for an unbound multisample slot on this GPU: skipped"); iv = dummy_view(vt); }
@@ -3751,17 +3754,45 @@ static void split_note(vshader *const *sh) {   // after a draw is recorded into 
     g_split_cnt++;
 }
 static int split_due(void) { if (C && g_split_n > 0 && g_split_seq == C->seq && g_split_cnt >= g_split_every) { g_split_cnt = 0; if (!g_split_flushes++) LOG("[vk] DM_VK_SPLIT_SHADER: first chunk sent after %d draws of a listed shader", g_split_every); return 1; } return 0; }
-// The textures a draw's stages sample, as stage_set resolved them (for crumb_detail), and draws that sample an attachment of the pass they draw in (a feedback loop:
-// undefined in Vulkan without VK_EXT_attachment_feedback_loop_layout, and a tiler such as the Adreno holds the attachment in its tile memory while the texture unit reads
-// the image's memory). Said for the first 16 shader / texture pairs; counted in g_fbl
+// The textures a draw's stages sample, as stage_set resolved them (for crumb_detail), and draws that sample an attachment of the pass they draw in (a feedback loop).
+// Every image is in VK_IMAGE_LAYOUT_GENERAL, so sampling a target of the pass is allowed; what Vulkan leaves undefined is reading what the same pass has written to that
+// subresource, with no barrier between (a tiler such as the Adreno holds the pass's writes in its tile memory, while the texture unit reads the image's memory: the reads
+// see the image as it was when the pass began, or a mix). NVN orders such draws with the game's barrier; the replay keeps the targets' pass across it. So the pass is
+// ended before a draw that samples an attachment the pass has written (cleared or drawn into since it began), and begun again on the same targets (fb_split): the
+// render pass's own dependencies make the writes visible to the texture reads, at the cost of one store and one load of the targets (DM_VK_FB_SPLIT=0: not split).
+// Counted per kind: the same level and layer (g_fbl; split in g_fbl_split; a draw that also writes the subresource it samples, still undefined, in g_fbl_self), and another
+// level of the same image (g_fbl_mip: a downsample chain, defined, as each level is its own subresource). Said for the first 16 shader / texture pairs
 static struct { uint64_t ser; uint32_t w, h; int fmt, att; } g_dtex[8]; static int g_ndtex; static uint64_t g_fbl;
-static void dtex_note(const vshader *s, const vtex *v) {
-    int att = -1; if (P.dv && P.dv->img == v->img) att = 8; for (int i = 0; i < 8; i++) if (P.cv[i] && P.cv[i]->img == v->img) att = i;
+static int fb_split_ok(void) { for (int i = 0; i < 8; i++) if (P.cv[i] && P.snap[i]) return 0; return 1; }   // not with a linear target's snapshot (lsnap_take), which the pass end drops
+static int fb_split_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FB_SPLIT"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FB_SPLIT=0: a draw sampling a target its pass wrote is drawn in the same pass"); } return v; }
+// whether a texture view (levels b.., n of them, 0: to the last; layers l.., nl) covers the attachment at level al, layer ay
+static int view_covers(const vtex *v, const view_t *vv, uint32_t al, uint32_t ay) {
+    uint32_t b = vv && vv->set_levels ? vv->base_level : 0, n = vv && vv->set_levels ? vv->nlevels : 0;
+    uint32_t l = vv && vv->set_layers ? vv->min_layer : 0, nl = vv && vv->set_layers ? vv->nlayers : 0;
+    if (!n) n = v->levels > b ? v->levels - b : 1;
+    if (!nl) nl = v->layers > l ? v->layers - l : 1;
+    return al >= b && al - b < n && ay >= l && ay - l < nl;
+}
+static void dtex_note(const vshader *s, const vtex *v, const view_t *vv) {
+    int att = -1, other = -1;
+    if (P.dv && P.dv->img == v->img) { if (view_covers(v, vv, g_p_dlv, g_p_dly)) att = 8; else other = 8; }
+    for (int i = 0; i < 8; i++) if (P.cv[i] && P.cv[i]->img == v->img) { if (view_covers(v, vv, P.clv[i], P.cly[i])) att = i; else if (att < 0) other = i; }
     if (g_ndtex < 8) g_dtex[g_ndtex++] = (typeof(g_dtex[0])){v->serial, v->w, v->h, (int)v->fmt, att};
-    if (att >= 0) { g_fbl++; static int nsaid; static const vshader *said[16]; static uint64_t said_ser[16]; int k = 0; while (k < nsaid && !(said[k] == s && said_ser[k] == v->serial)) k++;
-        if (k == nsaid && nsaid < 16) { said[nsaid] = s; said_ser[nsaid++] = v->serial;
-            LOG("[RED] [vk] feedback loop: shader %s samples texture s%llu %ux%u format %d, which is %s%.0d of the pass it draws in (%ux%u)", s->key, (unsigned long long)v->serial, v->w, v->h, (int)v->fmt,
-                att == 8 ? "the depth / stencil attachment" : "colour attachment ", att == 8 ? 0 : att, P.w, P.h); } }
+    if (att < 0 && other >= 0) { g_fbl_mip++; static int nm; if (nm < 8) { nm++;
+        LOG("[vk] feedback loop check: shader %s samples texture s%llu %ux%u while another level of it is %s %d of the pass (%ux%u): defined, each level its own subresource",
+            s->key, (unsigned long long)v->serial, v->w, v->h, other == 8 ? "the depth / stencil attachment" : "colour attachment", other == 8 ? 0 : other, P.w, P.h); } }
+    if (att < 0) return;
+    g_fbl++;
+    int wrote = att == 8 ? g_pw_ds : g_pw_c >> att & 1;
+    int self = att == 8 ? D.ds.dw && D.ds.dt : (D.chmask.mask >> 4 * att & 0xf) != 0;
+    if (self) g_fbl_self++;
+    if (wrote) g_fb_due = 1;
+    static int nsaid; static const vshader *said[16]; static uint64_t said_ser[16]; int k = 0; while (k < nsaid && !(said[k] == s && said_ser[k] == v->serial)) k++;
+    if (k == nsaid && nsaid < 16) { said[nsaid] = s; said_ser[nsaid++] = v->serial;
+        LOG("[RED] [vk] feedback loop: shader %s samples texture s%llu %ux%u format %d, which is %s %d of the pass it draws in (%ux%u)%s%s", s->key, (unsigned long long)v->serial, v->w, v->h, (int)v->fmt,
+            att == 8 ? "the depth / stencil attachment" : "colour attachment", att == 8 ? 0 : att, P.w, P.h,
+            wrote ? (fb_split_on() ? "; the pass wrote it: split before the draw" : "; the pass wrote it (DM_VK_FB_SPLIT=0: not split)") : "; not written in the pass yet",
+            self ? "; the draw writes it too (undefined still)" : ""); }
 }
 static int crumb_detail_on(vshader *const *sh) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CRUMB_DETAIL"); v = e && *e == '1'; } return v || split_hit(sh); }
 // DM_VK_SKIP_DRAW=<vertex shader hash>:<vertices>[,...] (env.txt): the draws of that vertex shader with that vertex (or index) count, as the hang report lists them, are
@@ -3840,12 +3871,17 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         int i = 0; g_bind_bad = 0;
         if (!cur()) { g_drop[3]++; return 0; }
         uint64_t dseq = C->seq;   // the chunk the sets come from (one: only a sync inside stage_set closes a chunk, and that stage_set then fails)
-        g_ndtex = 0;
+        g_ndtex = 0; g_fb_due = 0;
         for (; i < 4; i++) if (k.sh[i] && !stage_set(k.sh[i], 0, &sets[i], dyn[i], pprog[i], pst[i], base_inst, dseq)) break;
         if (i == 4) break;
         if (!ds_moved(dseq) || ds_again(t, 0)) { g_drop[3]++; return 0; }
     }
     if (g_bind_bad) { g_drop[4]++; static int nb; if (nb < 10) { nb++; LOG("[RED] [vk] draw skipped: a binding has no valid descriptor (shaders %s %s)", k.sh[0]->key, k.sh[1] ? k.sh[1]->key : "-"); } return 0; }
+    if (!rd && g_fb_due && P.active && fb_split_on() && fb_split_ok()) {   // a target the pass wrote, sampled: the pass ended first (dtex_note)
+        rp_end(); if (!g_fbl_split++ || (!(g_fbl_split & (g_fbl_split - 1)) && g_fbl_split >= 1024))
+            LOG("[vk] feedback loop: %llu passes split before a draw sampling a target they wrote (present %llu; DM_VK_FB_SPLIT=0: not split; %llu same-subresource reads, %llu also written by the draw, %llu of another level)",
+                (unsigned long long)g_fbl_split, (unsigned long long)atomic_load(&g_presents), (unsigned long long)g_fbl, (unsigned long long)g_fbl_self, (unsigned long long)g_fbl_mip); }
+    g_fb_due = 0;
     if (rd ? !rd_open() : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
     VkCommandBuffer c = C->cb;
     if (!rd) occl_begin();
@@ -3923,6 +3959,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         vs_layer_groups(c, pp, ib ? icount : count, inst, ib ? (int32_t)((di ? di->base_vertex : 0) - lo) : (int32_t)(dw->first - lo), base_inst - inst_shift(base_inst), ib != VK_NULL_HANDLE);
     g_draws++; C->ndraw++; crumb((dw ? dw->ind : di->ind) ? 'D' : 'd', k.sh[0]->key, k.sh[1] ? k.sh[1]->key : NULL, ib ? icount : count, inst);
     split_note(k.sh);   // DM_VK_SPLIT_SHADER
+    if (!rd) { if ((D.ds.dt && D.ds.dw) || D.ds.st) g_pw_ds = 1; for (int i = 0; i < 8; i++) if (D.chmask.mask >> 4 * i & 0xf) g_pw_c |= (uint8_t)(1u << i); }   // what the pass has written (fb_split)
     if (crumb_detail_on(k.sh)) {   // what this draw read, beside its crumb: the hang report names it
         if (!C->crd) C->crd = calloc(CR_MAX, sizeof *C->crd);
         if (C->crd) { char *o = C->crd[(C->ncr - 1) % CR_MAX]; size_t n = 160, l = 0;
@@ -4147,6 +4184,7 @@ static void clear_color_pass(const p_clear_color *cc) {
     uint32_t nl; if (!clear_rp_prepare(cc->index, (cc->mask & 0xf) == 0xf, &nl) || !rp_start()) return;
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     int ci = dup_slot(cc->index); VkFormat f = P.key.color[ci];
+    if (ci >= 0 && ci < 8) g_pw_c |= (uint8_t)(1u << ci);   // written in the pass (fb_split)
     if (nl > 1 && P.layers < nl) RED_ONCE(172, "clear of colour slot %d in a pass of %u layers, its view %u: the layers past the pass are not cleared", cc->index, P.layers, nl);
     if ((cc->mask & 0xf) == 0xf) {
         VkClearAttachment at = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)ci, {.color = clear_value(f, cc->rgba)}};
@@ -4167,7 +4205,7 @@ static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a) {
     uint32_t nl; if (!clear_rp_prepare(-1, !(a & VK_IMAGE_ASPECT_STENCIL_BIT) || (cd->stencil_mask & 0xff) == 0xff, &nl) || !rp_start() || !P.key.depth) return;
     if (nl > 1 && P.layers < nl) RED_ONCE(172, "depth-stencil clear in a pass of %u layers, its view %u: the layers past the pass are not cleared", P.layers, nl);
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
-    uint32_t sm = (uint32_t)cd->stencil_mask & 0xff;
+    uint32_t sm = (uint32_t)cd->stencil_mask & 0xff; g_pw_ds = 1;   // written in the pass (fb_split)
     if (!(a & VK_IMAGE_ASPECT_STENCIL_BIT) || sm == 0xff) {
         VkClearAttachment at = {a, 0, {.depthStencil = {cd->depth, (uint32_t)cd->stencil}}};
         VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;

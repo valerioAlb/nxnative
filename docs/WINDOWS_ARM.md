@@ -303,6 +303,8 @@ To narrow such a hang down (env.txt):
 | `DM_OVERLAY_WINDOW=0` | no window over the game at all: no touch controls, F2 menu, FPS or notes |
 | `DM_TOUCH_OVERLAY=off` | the touch controls hidden (F1 brings them back); the menu still works |
 
+**Feedback loops (`DM_VK_FB_SPLIT`).** A draw that samples a render target of the pass it draws in (a depth buffer read by water or decals, the lit scene read by a refraction shader) reads, on a tiled GPU like the Adreno, what the image held when the pass began, not what the pass has drawn since: Vulkan leaves it undefined without a barrier. The pass is ended before such a draw when the pass has written that target, and begun again on the same targets, so the draw sees the earlier draws. Reads of another mip level of the same image (downsample chains) are legal and are no longer reported as loops. The log counts the splits (`[vk] feedback loop: N passes split …`). `DM_VK_FB_SPLIT=0` turns it off.
+
 The hang report lists the submission's passes, draws, dispatches and (now) its copies, uploads, blits and clears. It also says whether the
 submission ever started on the GPU (its start timestamp written): one that never started waited behind other work, so its own
 draws are not the cause. While the GPU is stuck on a submission for 2 s or more, the note over the game says `Waiting for the GPU`

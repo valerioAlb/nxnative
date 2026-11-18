@@ -185,6 +185,7 @@ static int vk_try(char *why, size_t nwhy) {
     // Arm's Mali-G715 driver drops a primitive whose layer from a vertex shader is 8 or more (a geometry shader's reaches every layer): such draws into more layers are
     // drawn once per 8 (vs_layer_groups). DM_VK_VS_LAYERS=<n> (env.txt): that limit on any GPU; 0: none, a draw made once as before
     { const char *e = getenv("DM_VK_VS_LAYERS"); g_vs_layers = e ? atoi(e) : g_driver_id == VK_DRIVER_ID_ARM_PROPRIETARY ? 8 : 0; if (g_vs_layers < 0) g_vs_layers = 0; }
+    LOG("[vk] VK_EXT_attachment_feedback_loop_layout: %s (a draw sampling a target its pass wrote ends the pass first instead: fb_split, gfx_vk_draw.inc)", has_ext(de, nd, "VK_EXT_attachment_feedback_loop_layout") ? "the driver has it" : "not on this driver");
     int hqr = qr_host_env() && has_ext(de, nd, "VK_EXT_host_query_reset");   // the completion thread resets the queries a chunk used (Query resets below); core only from Vulkan 1.2
     int memreport = mr_want(de, nd);   // DM_VK_MEMREPORT (gfx_vk_memreport.inc)
     if (memreport) dext[nde++] = "VK_EXT_device_memory_report";
