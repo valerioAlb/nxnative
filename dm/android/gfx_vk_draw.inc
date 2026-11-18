@@ -3764,6 +3764,21 @@ static void dtex_note(const vshader *s, const vtex *v) {
                 att == 8 ? "the depth / stencil attachment" : "colour attachment ", att == 8 ? 0 : att, P.w, P.h); } }
 }
 static int crumb_detail_on(vshader *const *sh) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CRUMB_DETAIL"); v = e && *e == '1'; } return v || split_hit(sh); }
+// DM_VK_SKIP_DRAW=<vertex shader hash>:<vertices>[,...] (env.txt): the draws of that vertex shader with that vertex (or index) count, as the hang report lists them, are
+// left out: one mesh instead of every draw of the shader (DM_VK_SKIP_SHADER), to find the draw a GPU hangs in. Pokémon Pokopia's world hangs on an Adreno X1-45 had a
+// 1620-vertex draw of 85c01ed67ec089e9 in four of five hung submissions
+static int skip_draw(const vshader *vs, uint32_t count) {
+    static int n = -1; static char keys[16][17]; static uint32_t cnt[16];
+    if (n < 0) { int m = 0; const char *e = getenv("DM_VK_SKIP_DRAW");
+        while (e && *e && m < 16) { while (*e == ',' || *e == ' ' || *e == ';') e++; int j = 0; while (j < 16 && ((e[j] >= '0' && e[j] <= '9') || ((e[j] | 32) >= 'a' && (e[j] | 32) <= 'f'))) { keys[m][j] = (char)(e[j] | 32); j++; }
+            keys[m][j] = 0; e += j; if (j == 16 && *e == ':') { cnt[m] = (uint32_t)strtoul(e + 1, (char **)&e, 10); m++; } while (*e && *e != ',' && *e != ' ' && *e != ';') e++; }
+        n = m; if (n) LOG("[RED] [vk] DM_VK_SKIP_DRAW: %d listed draw(s) are left out (first %s:%u)", n, keys[0], cnt[0]); }
+    if (!n || !vs) return 0;
+    for (int i = 0; i < n; i++) if (count == cnt[i] && !strncmp(vs->key, keys[i], 16)) {
+        static uint64_t said; if (!said++) LOG("[vk] DM_VK_SKIP_DRAW: first draw left out, %s with %u vertices", keys[i], count);
+        return 1; }
+    return 0;
+}
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_d_init) draw_state_reset();
     if (!D.bst[0]) { RED_ONCE(95, "draw with no vertex program bound"); return 0; }
@@ -3802,6 +3817,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     resolved:;
     if (skip_shader(k.sh)) { g_drop[7]++; return 0; }   // DM_VK_SKIP_SHADER: a draw of a listed shader left out
+    if (skip_draw(k.sh[0], dw ? (uint32_t)dw->count : (uint32_t)di->count)) { g_drop[7]++; return 0; }   // DM_VK_SKIP_DRAW: one mesh of a shader left out
     // under rasterizer discard: a transform feedback capture, nothing, or (a stage writes memory) the draw run as a dispatch, its fragment stage dropped and the
     // targets' pass ended before its bindings are made, as vk_dispatch does (an image it writes may be one of the targets)
     int rd = D.rast_discard && rd_draw(k.sh);
