@@ -283,6 +283,7 @@ To narrow such a hang down (env.txt):
 |---|---|
 | `DM_VK_ROBUST=1` (or menu: GPU safe reads) | out-of-range buffer / image reads in shaders give 0 (robustBufferAccess, robustness2); a little slower. On by default for Pokémon Pokopia, whose world's draws hung the Adreno X1-45 without it (`DM_VK_ROBUST=0` turns it off) |
 | `DM_SPV_CB_BOUND=0` | turns off the bound on uniform buffer reads at a computed index (on by default, every GPU: such a read gives 0 past the 64 KB array, as on the Switch; Pokémon Pokopia's world shader hung the Adreno X1-45 reading gigabytes past it) |
+| `DM_VK_SPLIT_SHADER=<hash>[,<hash>]`, `DM_VK_SPLIT_DRAWS=<n>` | sends the chunk to the GPU after every n (default 8) draws of a listed vertex or fragment shader: a test for a GPU hang in a long run of one shader's draws (Pokémon Pokopia's world, `85c01ed67ec089e9`), cheaper than `DM_VK_MID_DRAWS=1` for every draw. Off by default |
 | `DM_SPV_LOOP_CAP=<n>` (menu: Shader loop limit) | every shader loop stops after n trips (default on the Adreno: 4096; `0` off). Applied as the shaders load: no new translation |
 | `DM_VK_STORAGE_UP=2` | an sRGB image a shader stores to is stored through its UNORM twin (the Adreno cannot store sRGB). On by default for Pokémon Pokopia, whose 3D world was black without it |
 | `DM_SPV_DEMOTE=1` | a fragment shader's discard (OpKill) becomes a demote to a helper invocation and a return: an A/B for a driver that mishandles OpKill |

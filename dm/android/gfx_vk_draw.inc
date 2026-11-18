@@ -530,7 +530,9 @@ static size_t spv_fit_cbbound(const uint32_t *code, size_t nw, const char *what,
     free(s);
     if (!k) { free(o); return 0; }
     atomic_fetch_add(&g_cbb_reads, nc);
-    if (!atomic_fetch_add(&g_cbb_mods, 1)) LOG("[vk] uniform buffer reads at computed indices give 0 past the declared array, as Maxwell's constant buffers (spv_cbbound; DM_SPV_CB_BOUND=0 off). First: %s, %u read(s)", what, nc);
+    uint64_t nm = atomic_fetch_add(&g_cbb_mods, 1);
+    if (!nm) LOG("[vk] uniform buffer reads at computed indices give 0 past the declared array, as Maxwell's constant buffers (spv_cbbound; DM_SPV_CB_BOUND=0 off). First: %s, %u read(s)", what, nc);
+    else if (nm < 128) LOG("[vk] spv_cbbound: %s, %u read(s) bounded", what, nc);   // each module (made twice: its identifier, then the module itself)
     *out = o; return k;
 }
 // The fragment shader with its discards made demotes and a return (spv_demote.h), in *out (to free); 0 when it has none or DM_SPV_DEMOTE=1 is not on (g_demote)
@@ -3727,6 +3729,26 @@ static int skip_shader(vshader *const *sh) {
         return 1; }
     return 0;
 }
+// DM_VK_SPLIT_SHADER=<hash>[,<hash>...] (env.txt): the chunk goes to the GPU after every DM_VK_SPLIT_DRAWS (default 8) draws of a listed vertex or fragment
+// shader, as DM_VK_MID_DRAWS does for every draw: a test of whether a long run of one shader's draws in one submission is what the GPU hangs in (Pokémon Pokopia's
+// world, 85c01ed67ec089e9 / 3fb06ea7d8ed1272 on an Adreno X1-45, did not hang with DM_VK_MID_DRAWS=1), at the cost of that shader's passes only
+static int g_split_n = -1, g_split_every = 8, g_split_cnt; static uint64_t g_split_seq, g_split_flushes; static char g_split_keys[16][17];
+static int split_hit(vshader *const *sh) {
+    if (g_split_n < 0) { int m = 0; const char *e = getenv("DM_VK_SPLIT_SHADER");
+        while (e && *e && m < 16) { while (*e == ',' || *e == ' ' || *e == ';') e++; int j = 0; while (j < 16 && ((e[j] >= '0' && e[j] <= '9') || ((e[j] | 32) >= 'a' && (e[j] | 32) <= 'f'))) { g_split_keys[m][j] = e[j] >= 'A' && e[j] <= 'F' ? (char)(e[j] | 32) : e[j]; j++; }
+            g_split_keys[m][j] = 0; if (j == 16) m++; e += j; while (*e && *e != ',' && *e != ' ' && *e != ';') e++; }
+        const char *d = getenv("DM_VK_SPLIT_DRAWS"); int v = d ? atoi(d) : 0; if (v > 0) g_split_every = v;
+        g_split_n = m; if (m) LOG("[vk] DM_VK_SPLIT_SHADER: the chunk goes to the GPU after every %d draws of %d listed shader(s) (first %s; DM_VK_SPLIT_DRAWS)", g_split_every, m, g_split_keys[0]); }
+    if (!g_split_n) return 0;
+    for (int q = 0; q < 2; q++) if (sh[q]) for (int i = 0; i < g_split_n; i++) if (!strncmp(sh[q]->key, g_split_keys[i], 16)) return 1;
+    return 0;
+}
+static void split_note(vshader *const *sh) {   // after a draw is recorded into C
+    if (!split_hit(sh)) return;
+    if (g_split_seq != C->seq) { g_split_seq = C->seq; g_split_cnt = 0; }
+    g_split_cnt++;
+}
+static int split_due(void) { if (C && g_split_n > 0 && g_split_seq == C->seq && g_split_cnt >= g_split_every) { g_split_cnt = 0; if (!g_split_flushes++) LOG("[vk] DM_VK_SPLIT_SHADER: first chunk sent after %d draws of a listed shader", g_split_every); return 1; } return 0; }
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_d_init) draw_state_reset();
     if (!D.bst[0]) { RED_ONCE(95, "draw with no vertex program bound"); return 0; }
@@ -3868,6 +3890,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!rd && (pp->lbpc & VK_SHADER_STAGE_VERTEX_BIT) && k.sh[0]->lbase && !k.sh[2] && !k.sh[3] && P.layered && P.layers > (uint32_t)g_vs_layers)   // the layers past the vertex shader's reach
         vs_layer_groups(c, pp, ib ? icount : count, inst, ib ? (int32_t)((di ? di->base_vertex : 0) - lo) : (int32_t)(dw->first - lo), base_inst - inst_shift(base_inst), ib != VK_NULL_HANDLE);
     g_draws++; C->ndraw++; crumb((dw ? dw->ind : di->ind) ? 'D' : 'd', k.sh[0]->key, k.sh[1] ? k.sh[1]->key : NULL, ib ? icount : count, inst);
+    split_note(k.sh);   // DM_VK_SPLIT_SHADER
     if (g_prof_cur >= 0) { prof_rec *pr = &g_prof[g_prof_cur]; uint64_t nv = (uint64_t)(ib ? icount : count) * inst; pr->draws++; pr->verts += nv;
         if (nv > pr->big) { pr->big = nv; pr->bigvs = k.sh[0]->key; pr->bigfs = k.sh[1] ? k.sh[1]->key : NULL; } }
     if (dump_on()) {

@@ -2499,14 +2499,14 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: if (!rc_skips()) clear_ds((const p_clear_ds *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_DRAW: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && (C->ndraw >= g_mid_draws || split_due()) && !vk_safe()) flush();
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: on VK_EXT_mesh_shader (gfx_vk_mesh.inc); the Adreno 7xx drivers and Turnip have none, and no lowering is ported
                       if (g_mesh || memu_on()) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }   // VK_EXT_mesh_shader, else their compute form (gfx_vk_meshemu.inc)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no VK_EXT_mesh_shader on this GPU (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && (C->ndraw >= g_mid_draws || split_due()) && !vk_safe()) flush();
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) g_cs_gbar = 1; break; }   // the replay's own syncs stand for barriers, apart from the order of dispatches (cs_game)
