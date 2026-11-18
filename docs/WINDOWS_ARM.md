@@ -240,6 +240,15 @@ the one above it, so `D:\nxnative_pokopia\nxlauncher.exe` finds every `D:\<name>
 and "Folders" removes one. The list and the last-played order are kept in `%LOCALAPPDATA%\nxnative\launcher.ini`.
 `nxlauncher.exe --folder <path>` adds a folder for that run only. Pin it to Start or the taskbar like any program.
 
+### Typing text: the game's software keyboard
+
+When the game opens its keyboard (a name, a search), a box opens over the window with the game's prompt: type with the keyboard
+and press Enter (OK) or Esc (Cancel); Cancel and the window's X send the game a cancel, as the Switch does. **⌨ Touch** opens
+Windows' touch keyboard; in tablet posture (the Surface's keyboard folded back or detached) it opens by itself. A minimum length
+the game sets keeps OK greyed out until it is reached. The box runs on a thread of its own: a game thread's stack is a few KB,
+and the window and its text services ran past it (the program closed without a line). `DM_TEXT_TEST=<s>` (with `DM_TEXT_AUTO=<text>`)
+checks it without a game: the box is asked for from a 16 KB stack after `<s>` seconds and answered by itself (CI).
+
 ### Controls: changing the keys and buttons, rumble
 
 F2 → **Controls** lists the Switch's buttons with their keyboard key and Xbox controller button. Choose a row (tap, click, or

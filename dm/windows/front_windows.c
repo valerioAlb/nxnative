@@ -238,43 +238,123 @@ int front_screen_max_fps(void) { HDC dc = GetDC(NULL); int hz = dc ? GetDeviceCa
 int front_ctrl_support(int min, int max) { (void)min; (void)max; return -1; }
 void front_screen_match(int fps) { (void)fps; }
 void front_progress(const char *title, long done, long total) { if (title) LOG("progress: %s %ld / %ld", title, done, total); }
-// The software keyboard: a small input box (the game's guide text as its prompt). UTF-8 both ways
-static wchar_t g_ti_text[512]; static const wchar_t *g_ti_title;
+// The software keyboard (hle_swkbd.c ShowKeyboard): an input box with the game's guide text as its prompt, UTF-8 both ways. The box has a host thread of its own (1 MB
+// stack) and the game's thread waits for it: ShowKeyboard is called on the game's thread, which runs on the stack the game gave it (often a few KB, no guard page), and the
+// window, its edit control and the text services behind it (IME, the touch keyboard: msctf) took more than that. Pokémon Pokopia on a Surface (Snapdragon X Plus) closed
+// with no line at all when its keyboard opened: the stack ran out under CreateWindowExW, where nothing is left to report it. Android does the same (front_android.c)
+extern int g_swkbd_min_chars, g_swkbd_numeric_max;   // hle_swkbd.c: this input's minimum length; ≥ 0: a number box with this upper limit
+typedef struct { wchar_t title[256], guide[512], init[1024], text[1024]; int max_chars, min_chars, numeric, r; DWORD err; HWND box; } ti_req;
+typedef struct ITipInvocation ITipInvocation;   // the touch keyboard's toggle (TabTip's COM interface, as the shell's own keyboard button uses)
+typedef struct { HRESULT (STDMETHODCALLTYPE *QueryInterface)(ITipInvocation *, REFIID, void **); ULONG (STDMETHODCALLTYPE *AddRef)(ITipInvocation *);
+                 ULONG (STDMETHODCALLTYPE *Release)(ITipInvocation *); HRESULT (STDMETHODCALLTYPE *Toggle)(ITipInvocation *, HWND); } ITipInvocationVtbl;
+struct ITipInvocation { const ITipInvocationVtbl *lpVtbl; };
+static void touch_keyboard_toggle(void) {
+    static const GUID clsid = {0x4ce576fa, 0x83dc, 0x4f88, {0x95, 0x1c, 0x9d, 0x07, 0x82, 0xb4, 0xe3, 0x76}}, iid = {0x37c994e7, 0x432b, 0x4834, {0xa2, 0xf7, 0xdc, 0xe1, 0xf1, 0x3b, 0x83, 0x4b}};
+    ITipInvocation *t = NULL; HRESULT hr = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_HANDLER | CLSCTX_LOCAL_SERVER, &iid, (void **)&t);
+    if (SUCCEEDED(hr) && t) { hr = t->lpVtbl->Toggle(t, GetDesktopWindow()); t->lpVtbl->Release(t); }
+    if (FAILED(hr)) {   // TabTip not running yet: start it (it shows itself)
+        HINSTANCE r = ShellExecuteW(NULL, L"open", L"C:\\Program Files\\Common Files\\microsoft shared\\ink\\TabTip.exe", NULL, NULL, SW_SHOWNORMAL);
+        LOG("software keyboard: touch keyboard %s (TabTip toggle %#lx)", (INT_PTR)r > 32 ? "started" : "could not be started", (unsigned long)hr);
+    }
+}
+enum { TI_EDIT = 100, TI_TOUCH = 101 };
 static LRESULT CALLBACK ti_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    ti_req *q = (ti_req *)GetWindowLongPtrW(h, GWLP_USERDATA);
     switch (m) {
     case WM_COMMAND:
-        if (LOWORD(w) == IDOK) { GetDlgItemTextW(h, 100, g_ti_text, 512); PostMessageW(h, WM_USER, 1, 0); return 0; }
+        if (LOWORD(w) == IDOK && q) { int n = GetWindowTextLengthW(GetDlgItem(h, TI_EDIT)); if (n < q->min_chars) { MessageBeep(MB_ICONWARNING); return 0; }
+                                      GetDlgItemTextW(h, TI_EDIT, q->text, 1024); PostMessageW(h, WM_USER, 1, 0); return 0; }
         if (LOWORD(w) == IDCANCEL) { PostMessageW(h, WM_USER, 0, 0); return 0; }
+        if (LOWORD(w) == TI_TOUCH) { SetFocus(GetDlgItem(h, TI_EDIT)); touch_keyboard_toggle(); return 0; }
+        if (LOWORD(w) == TI_EDIT && HIWORD(w) == EN_CHANGE && q) EnableWindow(GetDlgItem(h, IDOK), GetWindowTextLengthW(GetDlgItem(h, TI_EDIT)) >= q->min_chars);
         break;
     case WM_CLOSE: PostMessageW(h, WM_USER, 0, 0); return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
-int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
-    (void)sub;
-    static ATOM cls; HINSTANCE hi = GetModuleHandleW(NULL);
-    if (!cls) { WNDCLASSW wc = {.lpfnWndProc = ti_proc, .hInstance = hi, .lpszClassName = L"dmtext", .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .hCursor = LoadCursor(NULL, IDC_ARROW)}; cls = RegisterClassW(&wc); }
-    wchar_t wt[256] = L"", wg[256] = L"", wi[512] = L"";
-    MultiByteToWideChar(CP_UTF8, 0, title ? title : "", -1, wt, 256); MultiByteToWideChar(CP_UTF8, 0, guide && *guide ? guide : title ? title : "", -1, wg, 256);
-    MultiByteToWideChar(CP_UTF8, 0, initial ? initial : "", -1, wi, 512);
-    g_ti_title = wt;
-    HWND d = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, L"dmtext", wt[0] ? wt : L"Text", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 480, 160, g_wnd, NULL, hi, NULL);
-    if (!d) return -1;
-    CreateWindowExW(0, L"STATIC", wg, WS_CHILD | WS_VISIBLE, 12, 10, 440, 20, d, NULL, hi, NULL);
-    HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", wi, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 440, 26, d, (HMENU)100, hi, NULL);
-    if (max_chars > 0) SendMessageW(e, EM_LIMITTEXT, (WPARAM)max_chars, 0);
-    CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 270, 76, 85, 28, d, (HMENU)IDOK, hi, NULL);
-    CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 365, 76, 85, 28, d, (HMENU)IDCANCEL, hi, NULL);
-    SetFocus(e); SendMessageW(e, EM_SETSEL, 0, -1);
-    MSG msg; int r = -1;
+static DWORD WINAPI ti_thread(LPVOID p) {
+    ti_req *q = p; HINSTANCE hi = GetModuleHandleW(NULL);
+    HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    static ATOM cls; if (!cls) { WNDCLASSW wc = {.lpfnWndProc = ti_proc, .hInstance = hi, .lpszClassName = L"dmtext", .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .hCursor = LoadCursor(NULL, IDC_ARROW)}; cls = RegisterClassW(&wc); }
+    UINT dpi = g_wnd ? GetDpiForWindow(g_wnd) : 96; if (!dpi) dpi = 96;
+#define S(x) MulDiv((x), (int)dpi, 96)
+    int bw = S(600), bh = S(210); RECT wr = {0, 0, bw, bh}; AdjustWindowRectExForDpi(&wr, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, dpi);
+    int ww = wr.right - wr.left, wh = wr.bottom - wr.top, x = CW_USEDEFAULT, y = CW_USEDEFAULT; RECT pr;
+    if (g_wnd && GetWindowRect(g_wnd, &pr)) { x = pr.left + (pr.right - pr.left - ww) / 2; y = pr.top + (pr.bottom - pr.top - wh) / 3; if (y < pr.top) y = pr.top; }
+    HWND d = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, L"dmtext", q->title[0] ? q->title : L"Text", WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, NULL, NULL, hi, NULL);
+    if (!d) { q->err = GetLastError(); q->r = -2; if (SUCCEEDED(co)) CoUninitialize(); return 0; }
+    SetWindowLongPtrW(d, GWLP_USERDATA, (LONG_PTR)q);
+    HFONT f = CreateFontW(-S(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HWND lab = CreateWindowExW(0, L"STATIC", q->guide, WS_CHILD | WS_VISIBLE | SS_LEFT, S(14), S(12), S(572), S(46), d, NULL, hi, NULL);
+    HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", q->init, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | (q->numeric ? ES_NUMBER : 0), S(14), S(64), S(572), S(38), d, (HMENU)(INT_PTR)TI_EDIT, hi, NULL);
+    if (q->max_chars > 0) SendMessageW(e, EM_LIMITTEXT, (WPARAM)q->max_chars, 0);
+    HWND bt = CreateWindowExW(0, L"BUTTON", L"\u2328 Touch", WS_CHILD | WS_VISIBLE | WS_TABSTOP, S(14), S(140), S(150), S(50), d, (HMENU)(INT_PTR)TI_TOUCH, hi, NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, S(296), S(140), S(140), S(50), d, (HMENU)IDOK, hi, NULL);
+    HWND ca = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, S(446), S(140), S(140), S(50), d, (HMENU)IDCANCEL, hi, NULL);
+#undef S
+    HWND kids[] = {lab, e, bt, ok, ca}; for (int i = 0; i < 5; i++) if (kids[i] && f) SendMessageW(kids[i], WM_SETFONT, (WPARAM)f, TRUE);
+    if (!e || !ok) LOG("[RED] software keyboard: a control of the box was not made (error %lu)", (unsigned long)GetLastError());
+    EnableWindow(ok, GetWindowTextLengthW(e) >= q->min_chars);
+    ShowWindow(d, SW_SHOW); SetForegroundWindow(d); SetFocus(e); SendMessageW(e, EM_SETSEL, 0, -1);
+    q->box = d;
+    if (GetSystemMetrics(SM_CONVERTIBLESLATEMODE) == 0) touch_keyboard_toggle();   // a Surface with its keyboard folded back or detached (tablet posture): the touch keyboard at once
+    const char *aut = getenv("DM_TEXT_AUTO");   // test: the box shown, then this text typed and OK pressed after 1.5 s (CI: DM_TEXT_TEST)
+    if (aut) { wchar_t wa[256]; MultiByteToWideChar(CP_UTF8, 0, aut, -1, wa, 256); SetWindowTextW(e, wa); SetTimer(d, 1, 1500, NULL); }
+    MSG msg; q->r = -1;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.hwnd == d && msg.message == WM_USER) { r = (int)msg.wParam; break; }
+        if (msg.hwnd == d && msg.message == WM_USER) { q->r = (int)msg.wParam; break; }
+        if (msg.hwnd == d && msg.message == WM_TIMER) { KillTimer(d, 1); PostMessageW(d, WM_COMMAND, IDOK, 0); continue; }
         if (!IsDialogMessageW(d, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
-    DestroyWindow(d);
-    if (r != 1) return -1;
-    WideCharToMultiByte(CP_UTF8, 0, g_ti_text, -1, out, out_cap, NULL, NULL);
+    DestroyWindow(d); if (f) DeleteObject(f);
+    if (SUCCEEDED(co)) CoUninitialize();
     return 0;
+}
+int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
+    if (out_cap <= 0) return -1;
+    ti_req *q = calloc(1, sizeof *q);   // not on the caller's stack: that is the game's, and small
+    if (!q) { LOG("[RED] software keyboard: no memory for the input box: treated as cancel"); return 0; }
+    MultiByteToWideChar(CP_UTF8, 0, title ? title : "", -1, q->title, 256);
+    const char *g = guide && *guide ? guide : sub && *sub ? sub : title ? title : ""; MultiByteToWideChar(CP_UTF8, 0, g, -1, q->guide, 512);
+    MultiByteToWideChar(CP_UTF8, 0, initial ? initial : "", -1, q->init, 1024);
+    q->max_chars = max_chars; q->min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0; q->numeric = g_swkbd_numeric_max >= 0;
+    LOG("software keyboard: input box shown (limit %d, minimum %d%s)", max_chars, q->min_chars, q->numeric ? ", numbers only" : "");
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 1);   // the game's thread waits here: no vibration update comes meanwhile (as front_android.c)
+    HANDLE t = CreateThread(NULL, 1u << 20, ti_thread, q, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (!t) { LOG("[RED] software keyboard: the input box's thread could not start (error %lu): treated as cancel", (unsigned long)GetLastError()); dm_haptics_suspend(DM_HAPTICS_DIALOG, 0); free(q); return 0; }
+    WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 0);
+    if (g_wnd) SetForegroundWindow(g_wnd);
+    int r = q->r;
+    if (r == -2) LOG("[RED] software keyboard: the input box could not be made (CreateWindowExW error %lu): treated as cancel", (unsigned long)q->err);
+    if (r == 1) WideCharToMultiByte(CP_UTF8, 0, q->text, -1, out, out_cap, NULL, NULL);
+    LOG("software keyboard: %s", r == 1 ? "confirmed" : "cancelled");
+    free(q);
+    return r == 1 ? 1 : 0;
+}
+// Test (DM_TEXT_TEST=<s>, CI): <s> seconds in, the input box asked for from a thread running on a 16 KB stack of its own, the way a game's thread with a small stack asks
+// (a guest stack, its TEB bounds opened as dm_win_guest_thread_init does); DM_TEXT_AUTO's text (default "Zelda") is typed and OK pressed. The line "text box test: confirmed '...'" says it worked
+void dm_win_on_stack(void (*fn)(void *), void *arg, void *top);
+__asm__(".text\n.p2align 2\n.globl dm_win_on_stack\ndm_win_on_stack:\n"
+        "    stp x29, x30, [sp, #-16]!\n    mov x29, sp\n    mov x9, sp\n    mov sp, x2\n    str x9, [sp, #-16]!\n"
+        "    mov x16, x0\n    mov x0, x1\n    blr x16\n    ldr x9, [sp]\n    mov sp, x9\n    ldp x29, x30, [sp], #16\n    ret\n");
+static void text_test_body(void *p) {
+    char *out = p; int r = front_text_input("Name", "Check of the text box", "Type a name", "Link", 10, out, 64);
+    if (r <= 0) out[0] = 0, out[1] = (char)(r == 0 ? 'c' : 'n');
+}
+static DWORD WINAPI text_test_thread(LPVOID p) {
+    (void)p; void dm_win_guest_thread_init(void); dm_win_guest_thread_init();
+    if (!getenv("DM_TEXT_AUTO")) setenv("DM_TEXT_AUTO", "Zelda", 1);
+    enum { SMALL = 16384 }; uint8_t *stk = VirtualAlloc(NULL, SMALL, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); char *out = calloc(1, 64);
+    if (!stk || !out) { LOG("[RED] text box test: no memory"); return 0; }
+    LOG("text box test: asking from a %d KB stack", SMALL / 1024);
+    dm_win_on_stack(text_test_body, out, stk + SMALL);
+    if (out[0]) LOG("text box test: confirmed '%s'", out); else LOG("[RED] text box test: %s", out[1] == 'c' ? "cancelled" : "no box");
+    VirtualFree(stk, 0, MEM_RELEASE); free(out); return 0;
+}
+static void text_test_tick(void) {
+    static double at = -1; if (at < 0) { const char *e = getenv("DM_TEXT_TEST"); at = e ? atof(e) : 0; }
+    if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = 0; HANDLE t = CreateThread(NULL, 0, text_test_thread, NULL, 0, NULL); if (t) CloseHandle(t); }
 }
 void front_android_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; atomic_fetch_add(&g_frames, 1); }
 uint64_t front_vsync(uint64_t *refresh) { *refresh = 0; return 0; }   // no VK_GOOGLE_display_timing on Windows: frames are paced on the host's clock
@@ -813,5 +893,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           if (at > 0 && (double)(dm_win_mono_ns() - g_t0) / 1e9 > at) { at = 0; gpu_lost_hook(-4); } }
         ovl_follow();
         vk_start_tick();
+        text_test_tick();
     }
 }

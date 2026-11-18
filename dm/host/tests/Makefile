@@ -187,8 +187,8 @@ $(B)/t_ue_heap_span: t_ue_heap_span.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_
 run: $(B)/t_uecvar
 $(B)/t_uecvar: t_uecvar.c ../hle_uecvar.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_uecvar.c
-$(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c
+$(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c ../hle_bigstack.c
 run: $(B)/t_bigstack
 $(B)/t_bigstack: t_bigstack.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_bigstack.c ../hle_bigstack.c

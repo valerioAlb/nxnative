@@ -105,6 +105,8 @@ jobs:
             if ($case -eq 'game') { New-Item -ItemType Directory -Force "$d/game" | Out-Null; Copy-Item -Recurse bin/selftest "$d/game/code"; Copy-Item bin/selftest/main.fixups.tsv "$d/game/code/main.fixups.tsv" -ErrorAction SilentlyContinue }
             # the overlay's pictures (DM_OVL_DUMP, self test only): the touch controls, then the settings menu (DM_OPEN_MENU_AFTER)
             if ($case -eq 'selftest') { $env:DM_OVL_DUMP = $d } else { Remove-Item Env:DM_OVL_DUMP -ErrorAction SilentlyContinue }
+            # the software keyboard's input box asked for from a 16 KB stack 3 s in, its text typed and OK pressed by itself (DM_TEXT_TEST, self test only)
+            if ($case -eq 'selftest') { $env:DM_TEXT_TEST = '3' } else { Remove-Item Env:DM_TEXT_TEST -ErrorAction SilentlyContinue }
             # gpulost: the lost-GPU path (DM_TEST_GPU_LOST, answered with a close: DM_GPU_LOST_NOASK) with no window over the game (DM_OVERLAY_WINDOW=0)
             foreach ($k in 'DM_TEST_GPU_LOST', 'DM_GPU_LOST_NOASK', 'DM_OVERLAY_WINDOW') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
             if ($case -eq 'gpulost') { $env:DM_TEST_GPU_LOST = '4'; $env:DM_GPU_LOST_NOASK = '1'; $env:DM_OVERLAY_WINDOW = '0' }
@@ -124,6 +126,7 @@ jobs:
               elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'overlay_window=0' -Quiet)) { $fail += "gpulost : DM_OVERLAY_WINDOW=0 not taken ($how)" } }
           elseif (-not (Select-String -Path "$d/log.txt" -Pattern 'touch controls: on \(shown' -Quiet)) { $fail += "$case : the touch controls were not shown ($how)" }
           elseif ($case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern '\[watch\] threads' -Quiet)) { $fail += "selftest : no watchdog thread dump after 10 s of silence ($how)" }
+          elseif ($case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern "text box test: confirmed 'Zelda'" -Quiet)) { $fail += "selftest : the software keyboard's input box did not answer from a small stack (DM_TEXT_TEST) ($how)" }
             elseif ($done -and $p.ExitCode -ne 0 -and $case -eq 'selftest' -and -not (Select-String -Path "$d/log.txt" -Pattern 'selftest: PASS' -Quiet)) { $fail += "$case : $how" }
             Copy-Item "$d/log.txt" "gui_$case.log" -ErrorAction SilentlyContinue; Copy-Item "$d/crash.txt" "gui_$case.crash.txt" -ErrorAction SilentlyContinue
           }

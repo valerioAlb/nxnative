@@ -36,6 +36,7 @@ static int bytes_eq(const uint8_t *want, size_t n) {   // the first n bytes equa
     return 1;
 }
 
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }   // hle_svc.c: no guest address space here, so ShowKeyboard (HLE_FORCE_BIG, hle_bigstack.c) stays on the calling stack
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: ShowKeyboard holds the game out of focus; swkbd_show, tested here, does not
 void dm_applet_leave(void) {}
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }   // the real implementation is in hle_os.c; the unit test does not care about the clock
