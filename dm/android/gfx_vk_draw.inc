@@ -576,6 +576,29 @@ static size_t spv_fit_loopcap(const uint32_t *code, size_t nw, const char *what,
     else if (nm < 64) { const char *b = strrchr(what, '/'); LOG("[vk] shader loops capped: %s, %u loop(s)", b ? b + 1 : what, nc); }   // which shaders: to match a hang report's
     *out = o; return k;
 }
+// The vertex shader with its position made safe (spv_possafe.h), in *out (to free); 0 when it is no vertex shader or the patch is off. On by default with Qualcomm's
+// driver on Windows: Pokémon Pokopia's world hung the Adreno X1-45 in passes of 85c01ed67ec089e9 or 319aa70662279688 draws alone, when new meshes streamed in,
+// robust access on or off; a garbage matrix index can place a vertex at NaN or infinity, which Maxwell drops (suspected, not confirmed, as the hang's trigger).
+// DM_SPV_POS_SAFE=0 (env.txt): off; 1: on with any driver
+static _Atomic uint64_t g_ps_mods;
+static size_t spv_fit_possafe(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_SPV_POS_SAFE");
+#ifdef _WIN32
+        int d = g_qcom_driver;
+#else
+        int d = 0;
+#endif
+        on = e && *e ? *e != '0' : d;
+        LOG("[vk] vertex positions: %s (spv_possafe; DM_SPV_POS_SAFE=%d%s)", on ? "NaN or infinite made (0,0,0,1), clamped to +-1e15" : "as translated", !on, e && *e ? ", set" : " to change, the default"); }
+    *out = NULL;
+    if (!on || nw < 5 || !spv_possafe_wanted(code, nw)) return 0;
+    size_t cap = nw + SPV_POSSAFE_DECL + SPV_POSSAFE_PER * 64; uint32_t *o = malloc(cap * 4); unsigned nr = 0;
+    size_t k = o ? spv_possafe(code, nw, o, cap, &nr) : 0;
+    if (!k) { free(o); return 0; }
+    if (!atomic_fetch_add(&g_ps_mods, 1)) LOG("[vk] vertex positions made safe (spv_possafe). First: %s, %u return(s)", what, nr);
+    *out = o; return k;
+}
 // The vertex shader with its outputs started as (0,0,0,1) (spv_vsinit.h), in *out (to free); 0 when it is no vertex shader or has no output to start.
 // On every GPU: an unwritten component is undefined in Vulkan and reads 0 on the Adreno 840 and the Mali-G715, where the hardware gives (0,0,0,1).
 // DM_SPV_VSINIT=0 (env.txt): modules as translated

@@ -305,6 +305,8 @@ To narrow such a hang down (env.txt):
 
 **Feedback loops (`DM_VK_FB_SPLIT`).** A draw that samples a render target of the pass it draws in (a depth buffer read by water or decals, the lit scene read by a refraction shader) reads, on a tiled GPU like the Adreno, what the image held when the pass began, not what the pass has drawn since: Vulkan leaves it undefined without a barrier. The pass is ended before such a draw when the pass has written that target, and begun again on the same targets, so the draw sees the earlier draws. Reads of another mip level of the same image (downsample chains) are legal and are no longer reported as loops. The log counts the splits (`[vk] feedback loop: N passes split …`). `DM_VK_FB_SPLIT=0` turns it off.
 
+**Vertex positions (`DM_SPV_POS_SAFE`).** With Qualcomm's driver every vertex shader's position is checked when the module loads: a NaN or infinite position becomes (0,0,0,1) and each component is clamped to ±1e15 (Maxwell drops such vertices; the Adreno's binning is suspected to stall on them, the Pokopia world hangs in passes of 85c01ed67ec089e9 / 319aa70662279688 alone). No shader re-translation; the pipelines are built again once. `DM_SPV_POS_SAFE=0` turns it off.
+
 The hang report lists the submission's passes, draws, dispatches and (now) its copies, uploads, blits and clears. It also says whether the
 submission ever started on the GPU (its start timestamp written): one that never started waited behind other work, so its own
 draws are not the cause. While the GPU is stuck on a submission for 2 s or more, the note over the game says `Waiting for the GPU`

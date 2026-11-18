@@ -45,6 +45,7 @@
 #include "spv_cbbound.h"   // uniform buffer reads at a computed index give 0 past the declared array, as Maxwell's (gfx_vk_draw.inc spv_fit_cbbound)
 #include "spv_demote.h"   // DM_SPV_DEMOTE=1: a fragment shader's OpKill made a demote and a return (gfx_vk_draw.inc spv_fit_demote)
 #include "spv_loopcap.h"   // every loop of a translated shader ended after a cap of trips, so one that never ends cannot hold the GPU until the driver resets it (gfx_vk_draw.inc spv_fit_loopcap)
+#include "spv_possafe.h"   // a vertex shader's position: NaN / infinite made (0,0,0,1), clamped to +-1e15 (gfx_vk_draw.inc spv_fit_possafe)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
 #include "spv_tffrag.h"   // transform feedback captured in the fragment stage on a GPU without vertex-stage storage writes (gfx_vk_draw.inc tf_capture)

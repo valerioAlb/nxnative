@@ -58,6 +58,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
     uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)
     uint32_t *dm = NULL; size_t dmn = spv_fit_demote(code, n, path, &dm); if (dmn) { free(code); code = dm; n = dmn; }   // DM_SPV_DEMOTE=1: discards as demotes (spv_demote.h)
     uint32_t *lc = NULL; size_t lcn = spv_fit_loopcap(code, n, path, &lc); if (lcn) { free(code); code = lc; n = lcn; }   // every loop ended after a cap of trips (spv_loopcap.h)
+    uint32_t *ps = NULL; size_t psn = spv_fit_possafe(code, n, path, &ps); if (psn) { free(code); code = ps; n = psn; }   // the position: NaN / infinite made (0,0,0,1), clamped (spv_possafe.h)
     uint32_t *pr = NULL; size_t prn = spv_fit_precise(code, n, path, &pr); if (prn) { free(code); code = pr; n = prn; }   // FMUL and FADD unfused where vertices are placed
     if (alpha) {   // NVN's alpha test, run in a wrapper entry point (spv_alpha.h); a shader it does not apply to is no module
         size_t cap = n + 256; uint32_t *o = malloc(cap * 4), fn_id = 0;
